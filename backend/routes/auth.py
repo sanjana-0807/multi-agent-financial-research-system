@@ -1,10 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from fastapi.security import OAuth2PasswordRequestForm
 
-from schemas.auth_schema import (
-    SignupRequest,
-    LoginRequest,
-)
-
+from schemas.auth_schema import SignupRequest
 from services.auth_service import AuthService
 
 router = APIRouter(
@@ -22,8 +19,12 @@ def signup(user: SignupRequest):
 
 
 @router.post("/login")
-def login(user: LoginRequest):
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """
-    Login existing user.
+    Login existing user using OAuth2 Password Flow.
+    Swagger Authorize button uses this endpoint.
     """
-    return AuthService.login(user)
+    return AuthService.login(
+        form_data.username,
+        form_data.password
+    )
