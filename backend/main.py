@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from database.mongo_client import init_db
 from routes import companies
 from routes import auth
+from routes import research
 
 
 @asynccontextmanager
@@ -22,6 +23,7 @@ app = FastAPI(
 
 app.include_router(companies.router)
 app.include_router(auth.router)
+app.include_router(research.router)
 
 
 @app.get("/")
