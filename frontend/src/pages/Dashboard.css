@@ -1,0 +1,44 @@
+.metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+}
+
+.ratios {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+}
+
+.card {
+    background-color: #1a1f2e;
+    padding: 16px;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.metrics .card {
+  border-left: 4px solid #22c55e;
+}
+
+.ratios .card {
+  border-left: 4px solid #38bdf8;
+}
+.value-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: center;
+}
+.chart-placeholder {
+  border: 2px dashed #3a4152;
+  border-radius: 8px;
+  padding: 40px;
+  text-align: center;
+  color: #6b7280;
+  margin-top: 16px;
+}
+.charts-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
