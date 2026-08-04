@@ -1,10 +1,16 @@
 from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
 
-client = MongoClient("mongodb://localhost:27017/")
-db = client["financial_research"]
+# Load environment variables
+load_dotenv()
+
+# Connect to MongoDB Atlas
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client[os.getenv("DATABASE_NAME")]
 
 documents = db["documents"]
 
-result = documents.find_one({"document_id":"D100"})
+result = documents.find_one({"document_id": "D100"})
 
 print(result)

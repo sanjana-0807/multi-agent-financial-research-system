@@ -1,11 +1,12 @@
 import chromadb
 
 # Create a ChromaDB client
-client = chromadb.Client()
+client = chromadb.PersistentClient(path="./chroma_storage")
 
 # Create a collection
-collection = client.create_collection(name="financial_documents")
-
+collection = client.get_or_create_collection(
+    name="financial_documents"
+)
 # Add sample financial documents
 collection.add(
     documents=[

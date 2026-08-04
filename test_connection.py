@@ -1,10 +1,15 @@
 from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
 
-# Connect to MongoDB
-client = MongoClient("mongodb://localhost:27017/")
+# Load environment variables
+load_dotenv()
+
+# Connect to MongoDB Atlas
+client = MongoClient(os.getenv("MONGO_URI"))
 
 # Access the database
-db = client["financial_research"]
+db = client[os.getenv("DATABASE_NAME")]
 
 # Check connection
 print("Connected Successfully!")
