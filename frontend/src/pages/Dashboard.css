@@ -1,21 +1,15 @@
 .metrics {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    gap: 16px;
+    gap: 10px;
 }
 
 .ratios {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    gap: 16px;
+    gap: 10px;
 }
 
-.card {
-    background-color: #1a1f2e;
-    padding: 16px;
-    border-radius: 8px;
-    overflow: hidden;
-}
 .metrics .card {
   border-left: 4px solid #22c55e;
 }
@@ -32,7 +26,7 @@
 .chart-placeholder {
   border: 2px dashed #3a4152;
   border-radius: 8px;
-  padding: 40px;
+  padding: 20px;
   text-align: center;
   color: #6b7280;
   margin-top: 16px;
@@ -41,4 +35,53 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+}
+.dashboard-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  background-color: #12151f;
+  padding: 20px;
+}
+
+.main-content {
+  flex: 1;
+  padding: 24px;
+}
+.icon-box {
+  width: 40px;
+  height: 40px;
+  background-color: #e0edff;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #2563eb;
+  margin-bottom: 8px;
+}
+.card {
+  background-color: #FFFFFF;
+  padding: 12px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.sidebar p {
+  padding: 10px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #9ca3af;
+}
+
+.sidebar p.active {
+  background-color: #2563eb;
+  color: #FFFFFF;
+}
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
