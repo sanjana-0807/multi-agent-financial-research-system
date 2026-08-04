@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 from database.mongo_client import init_db
 from routes import companies
+from routes import auth
 
 
 @asynccontextmanager
@@ -10,7 +11,6 @@ async def lifespan(app: FastAPI):
     # Startup: connect to MongoDB and initialize Beanie document models
     await init_db()
     yield
-    # Shutdown: (add cleanup here later if needed, e.g. closing connections)
 
 
 app = FastAPI(
@@ -21,6 +21,7 @@ app = FastAPI(
 )
 
 app.include_router(companies.router)
+app.include_router(auth.router)
 
 
 @app.get("/")
