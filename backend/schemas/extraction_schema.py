@@ -1,5 +1,7 @@
 from decimal import Decimal
 from pydantic import BaseModel
+class Config:
+    from_attributes = True
 class Ratios(BaseModel):
     current_ratio: Decimal
     debt_to_equity: Decimal
