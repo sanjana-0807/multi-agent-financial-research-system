@@ -16,7 +16,7 @@ This is the exact shape the Extraction Agent will output, agreed and confirmed w
   "assets": 247489282,
   "liabilities": 628742,
   "cash_flow": 82782732,
-  "eps": 847289,
+  "eps": 8.47,
   "ratios": {
     "current_ratio": 1.8,
     "debt_to_equity": 0.38,
