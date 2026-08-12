@@ -1,10 +1,11 @@
 # database/mongo_client.py
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
-
+from models.comparison_result import ComparisonResult
 from config.settings import settings
 from models.user import User
 from models.company import Company
+from models.comparison_result import ComparisonResult
 
 client: AsyncIOMotorClient | None = None
 
@@ -16,5 +17,5 @@ async def init_db():
 
     await init_beanie(
         database=database,
-        document_models=[User, Company],
+        document_models=[User, Company, ComparisonResult],
     )
