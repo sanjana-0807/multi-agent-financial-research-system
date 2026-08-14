@@ -1,37 +1,54 @@
-import { Briefcase, FileText, Clock } from 'lucide-react'
+import { FolderKanban, FileText, Clock, ArrowRight, Sparkles } from 'lucide-react'
 import { formatDate } from '../../utils/formatDate.js'
 
 function WorkspaceCard({ workspace, onClick }) {
   return (
     <div
       onClick={() => onClick?.(workspace)}
-      className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 hover:border-blue-300 hover:shadow-md transition-all cursor-pointer"
+      className="group relative bg-white rounded-2xl border border-slate-200/80 shadow-3d-subtle shadow-3d-hover hover:border-blue-300 transition-all duration-300 p-5 cursor-pointer perspective-1000 select-none overflow-hidden"
     >
-      <div className="flex items-start justify-between mb-3">
-        <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center">
-          <Briefcase size={20} className="text-blue-600" />
+      {/* Top accent gradient line */}
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-indigo-500 to-emerald-400 opacity-70 group-hover:opacity-100 transition-opacity" />
+
+      {/* Header Icon & Status Pill */}
+      <div className="flex items-center justify-between mb-3.5">
+        <div className="w-11 h-11 rounded-xl bg-blue-50/80 border border-blue-100 flex items-center justify-center text-blue-600 group-hover:scale-110 group-hover:bg-blue-600 group-hover:text-white transition-all duration-300 shadow-xs">
+          <FolderKanban size={20} />
         </div>
+        <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80">
+          <Sparkles size={10} className="text-blue-500" /> Active Session
+        </span>
       </div>
 
-      <h3 className="text-sm font-semibold text-gray-900 mb-1">
-        {workspace.name || 'Untitled Session'}
+      {/* Title & Description */}
+      <h3 className="text-base font-bold text-slate-900 group-hover:text-blue-600 transition-colors mb-1 tracking-tight">
+        {workspace.name || 'Untitled Research Session'}
       </h3>
-      <p className="text-xs text-gray-500 mb-3 line-clamp-2">
-        {workspace.description || 'No description'}
+      <p className="text-xs font-medium text-slate-500 mb-4 line-clamp-2 leading-relaxed">
+        {workspace.description || 'Comprehensive financial report and ratio analysis session.'}
       </p>
 
-      <div className="flex items-center gap-4 text-xs text-gray-400">
-        <span className="flex items-center gap-1">
-          <FileText size={12} />
-          {workspace.document_count ?? 0} docs
-        </span>
-        <span className="flex items-center gap-1">
-          <Clock size={12} />
-          {formatDate(workspace.created_at)}
-        </span>
+      {/* Metadata Footer */}
+      <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs font-semibold text-slate-400">
+        <div className="flex items-center gap-3">
+          <span className="flex items-center gap-1 text-slate-600">
+            <FileText size={13} className="text-blue-500" />
+            {workspace.document_count ?? 0} Disclosures
+          </span>
+          <span className="flex items-center gap-1 text-slate-400">
+            <Clock size={13} />
+            {formatDate(workspace.created_at)}
+          </span>
+        </div>
+
+        <div className="text-blue-600 group-hover:translate-x-1 transition-transform flex items-center gap-0.5">
+          <span className="text-xs font-bold">Open</span>
+          <ArrowRight size={14} />
+        </div>
       </div>
     </div>
   )
 }
 
 export default WorkspaceCard
+

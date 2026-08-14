@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { UserPlus } from 'lucide-react'
+import { UserPlus, User, Mail, Lock, Cpu, Sparkles } from 'lucide-react'
+import Input from '../../components/Input.jsx'
+import Button from '../../components/Button.jsx'
 import { signup } from '../../api/authApi.js'
 
 function SignupPage() {
+  const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
@@ -15,60 +18,96 @@ function SignupPage() {
     setError(null)
     setSubmitting(true)
     try {
-      await signup(email, password)
-      // after signup, send them to login to actually authenticate
+      await signup(username, email, password, password)
       navigate('/login')
     } catch (err) {
-      setError(err.response?.data?.detail || 'Signup failed - try again')
+      const detail = err.response?.data?.detail
+      if (typeof detail === 'string') {
+        setError(detail)
+      } else if (Array.isArray(detail) && detail[0]?.msg) {
+        setError(detail[0].msg)
+      } else {
+        setError('Signup failed - try again with different credentials')
+      }
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 w-full max-w-sm">
-        <div className="flex items-center gap-2 mb-6">
-          <UserPlus size={20} className="text-blue-600" />
-          <h1 className="text-xl font-semibold text-gray-900">Sign up</h1>
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 select-none animate-fadeIn">
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-3d-subtle shadow-3d-hover transition-all duration-300 p-8 w-full max-w-md space-y-6">
+        {/* Header Branding */}
+        <div className="text-center space-y-2">
+          <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center mx-auto shadow-md shadow-blue-500/20">
+            <Cpu size={24} className="animate-pulse" />
+          </div>
+          <div className="flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-blue-600">
+            <Sparkles size={12} /> Multi-Agent AI System
+          </div>
+          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Create an Account</h1>
+          <p className="text-xs font-medium text-slate-500">
+            Join the platform to perform automated financial research & risk analysis.
+          </p>
         </div>
 
+        {/* Signup Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
+          <Input
+            label="Full Name / Username"
+            type="text"
+            placeholder="John Doe"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            icon={User}
+            required
+          />
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          <Input
+            label="Email Address"
+            type="email"
+            placeholder="analyst@firm.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            icon={Mail}
+            required
+          />
 
-          <button
+          <Input
+            label="Password"
+            type="password"
+            placeholder="••••••••"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            icon={Lock}
+            required
+          />
+
+          {error && (
+            <p className="text-xs font-semibold text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-200">
+              {error}
+            </p>
+          )}
+
+          <Button
             type="submit"
             disabled={submitting}
-            className="w-full bg-blue-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+            loading={submitting}
+            icon={UserPlus}
+            variant="primary"
+            size="lg"
+            className="w-full"
           >
-            {submitting ? 'Creating account...' : 'Sign up'}
-          </button>
+            Create Account
+          </Button>
         </form>
 
-        <p className="text-sm text-gray-500 mt-4 text-center">
+        {/* Footer Navigation Link */}
+        <p className="text-xs font-semibold text-slate-500 text-center pt-2 border-t border-slate-100">
           Already have an account?{' '}
-          <Link to="/login" className="text-blue-600 hover:underline">Log in</Link>
+          <Link to="/login" className="text-blue-600 font-bold hover:underline">
+            Log in
+          </Link>
         </p>
       </div>
     </div>
@@ -76,3 +115,4 @@ function SignupPage() {
 }
 
 export default SignupPage
+
