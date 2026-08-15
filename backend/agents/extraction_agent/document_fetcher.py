@@ -1,19 +1,20 @@
-from pymongo import MongoClient
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-
-client = MongoClient(os.getenv("MONGO_URI"))
-db = client[os.getenv("DATABASE_NAME")]
-documents = db["documents"]
+from vectorstore.chroma_client import collection
 
 
-def fetch_document_text(document_id):
-    result = documents.find_one({"document_id": document_id})
-    if result is None:
+def fetch_document_text(document_id: str):
+    result = collection.get(
+        where={"document_id": document_id},
+        include=["documents", "metadatas"],
+    )
+
+    ids = result.get("ids", [])
+    if not ids:
         return None
 
-    # NOTE: not confirmed with member 5 yet which field actually holds
-    # the text - assuming "text" for now, change if hers is different
-    return result.get("text")
+    documents = result.get("documents", [])
+    metadatas = result.get("metadatas", [])
+
+    paired = list(zip(documents, metadatas))
+    paired.sort(key=lambda item: (item[1]["page"], item[1]["chunk_index"]))
+
+    return "\n\n".join(text for text, _ in paired)
