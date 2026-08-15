@@ -14,6 +14,9 @@ class DocumentModel(Document):
     page_count: int = 0
     chunk_count: int = 0
 
+    ocr_used: bool = False
+    ocr_page_count: int = 0
+
     status: str = "uploaded"
 
     created_at: datetime = Field(

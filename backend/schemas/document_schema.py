@@ -10,4 +10,6 @@ class DocumentResponse(BaseModel):
     embedding_status: str
     vector_database: str
     metadata_database: str
+    ocr_used: bool
+    ocr_page_count: int
     status: str

@@ -1,0 +1,49 @@
+# docker-compose.yml
+#
+# Run the whole stack (API + Redis for Celery) with:
+#   docker compose up --build
+#
+# This is what makes OCR "just work" for anyone on the team, or any CI
+# job: they don't install Tesseract/Poppler themselves at all -- those
+# are baked into the `backend` image via backend/Dockerfile.
+#
+# MongoDB: by default this now uses whatever MONGODB_URL is set in
+# backend/.env (e.g. your Atlas cluster) -- nothing here overrides it.
+# A local throwaway Mongo container is still available if you want one
+# instead (e.g. for fully offline dev); see the "mongo-local" service
+# below, which only starts if you explicitly ask for it via --profile.
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - redis
+    volumes:
+      # Optional: persist uploaded PDFs outside the container so they
+      # survive a rebuild. Remove if you don't want this.
+      - ./backend/documents:/app/documents
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Optional local MongoDB, only used if you don't want to hit Atlas
+  # during dev. Start it explicitly with:
+  #   docker compose --profile local-db up --build
+  # and set MONGODB_URL=mongodb://mongo-local:27017 in backend/.env
+  # while using it.
+  mongo-local:
+    image: mongo:7
+    profiles: ["local-db"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_local_data:/data/db
+
+volumes:
+  mongo_local_data:

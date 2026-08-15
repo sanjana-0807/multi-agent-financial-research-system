@@ -7,6 +7,7 @@ from fastapi import HTTPException, UploadFile
 from pypdf import PdfReader
 
 from models.document import DocumentModel
+from services.ocr_service import OCRService
 from vectorstore.chroma_client import collection
 
 
@@ -71,13 +72,14 @@ class DocumentService:
 
         file_size = len(content)
 
-        # 4. Parse PDF
+        # 4. Parse PDF (text layer first, OCR fallback for image-only pages)
         try:
             reader = PdfReader(file_path)
 
             page_count = len(reader.pages)
 
             pages = []
+            ocr_page_numbers = []
 
             for page_number, page in enumerate(
                 reader.pages,
@@ -86,10 +88,15 @@ class DocumentService:
                 text = page.extract_text() or ""
                 text = text.strip()
 
-                if text:
+                if OCRService.needs_ocr(text):
+                    # Page has no usable text layer (scanned/image page).
+                    # Flag it for OCR instead of dropping it.
+                    ocr_page_numbers.append(page_number)
+                else:
                     pages.append({
                         "page": page_number,
-                        "text": text
+                        "text": text,
+                        "source": "text_layer"
                     })
 
         except Exception as exc:
@@ -102,6 +109,46 @@ class DocumentService:
                 detail=f"Could not parse PDF: {str(exc)}"
             )
 
+        # 4b. OCR any pages that had no usable text layer
+        ocr_used = False
+
+        if ocr_page_numbers:
+            try:
+                ocr_results = OCRService.extract_pages(
+                    file_path,
+                    ocr_page_numbers
+                )
+            except RuntimeError as exc:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "This document appears to be scanned and OCR "
+                        f"processing failed: {str(exc)}"
+                    )
+                )
+
+            for page_number in ocr_page_numbers:
+                ocr_text = ocr_results.get(page_number, "").strip()
+
+                if ocr_text:
+                    ocr_used = True
+                    pages.append({
+                        "page": page_number,
+                        "text": ocr_text,
+                        "source": "ocr"
+                    })
+
+            # Keep pages in correct reading order after merging
+            # text-layer pages and OCR'd pages.
+            pages.sort(key=lambda p: p["page"])
+
+        ocr_page_count = sum(
+            1 for page_data in pages if page_data["source"] == "ocr"
+        )
+
         # 5. Create text chunks
         chunks = []
 
@@ -109,6 +156,7 @@ class DocumentService:
 
             page_number = page_data["page"]
             text = page_data["text"]
+            source = page_data["source"]
 
             page_chunks = cls.chunk_text(text)
 
@@ -118,7 +166,8 @@ class DocumentService:
                 chunks.append({
                     "text": chunk,
                     "page": page_number,
-                    "chunk_index": chunk_index
+                    "chunk_index": chunk_index,
+                    "source": source
                 })
 
         if not chunks:
@@ -129,8 +178,9 @@ class DocumentService:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No readable text was found in the PDF. "
-                    "The document may be scanned and require OCR."
+                    "No readable text was found in the PDF, even after "
+                    "OCR. The document may be empty, corrupted, or of "
+                    "insufficient scan quality."
                 )
             )
 
@@ -155,7 +205,8 @@ class DocumentService:
                 "document_id": document_id,
                 "filename": file.filename,
                 "page": chunk["page"],
-                "chunk_index": chunk["chunk_index"]
+                "chunk_index": chunk["chunk_index"],
+                "source": chunk["source"]
             })
 
         # 7. Store chunks in ChromaDB
@@ -179,6 +230,8 @@ class DocumentService:
             file_size=file_size,
             page_count=page_count,
             chunk_count=len(chunks),
+            ocr_used=ocr_used,
+            ocr_page_count=ocr_page_count,
             status="indexed",
             created_at=now,
             updated_at=now
@@ -195,6 +248,8 @@ class DocumentService:
     "embedding_status": "generated",
     "vector_database": "ChromaDB",
     "metadata_database": "MongoDB",
+    "ocr_used": ocr_used,
+    "ocr_page_count": ocr_page_count,
     "status": "indexed"
 }
 
