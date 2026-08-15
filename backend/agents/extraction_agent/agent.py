@@ -5,7 +5,7 @@ from crewai import Agent, LLM
 load_dotenv()
 
 llm = LLM(
-    model="anthropic/claude-sonnet-4-6",
+    model="anthropic/claude-3-5-sonnet-20241022",
     api_key=os.getenv("ANTHROPIC_API_KEY"),
 )
 

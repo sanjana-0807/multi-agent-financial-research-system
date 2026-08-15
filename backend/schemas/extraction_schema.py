@@ -23,3 +23,8 @@ class ExtractionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ExtractionRequest(BaseModel):
+    document_id: str
+
