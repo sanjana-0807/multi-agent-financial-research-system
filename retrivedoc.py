@@ -11,6 +11,6 @@ db = client[os.getenv("DATABASE_NAME")]
 
 documents = db["documents"]
 
-result = documents.find_one({"document_id": "D100"})
+result = documents.find_one({})
 
 print(result)
