@@ -1,4 +1,11 @@
-from crewai import Agent
+from crewai import Agent, LLM
+
+
+# Use local Ollama model instead of OpenAI/Anthropic
+llm = LLM(
+    model="ollama/llama3.2:latest",
+    base_url="http://localhost:11434",
+)
 
 
 def create_document_agent():
@@ -9,7 +16,7 @@ def create_document_agent():
     - Validate uploaded documents
     - Parse PDF documents
     - Extract text
-    - OCR pages that have no extractable text layer (scanned/image pages)
+    - OCR pages that have no extractable text layer
     - Chunk extracted text
     - Generate embeddings
     - Store vectors in ChromaDB
@@ -22,7 +29,6 @@ def create_document_agent():
         goal=(
             "Process financial research documents by extracting their text, "
             "creating meaningful chunks, generating embeddings, and indexing "
-            "-- falling back to OCR for scanned or image-only pages -- "
             "the document content for downstream financial research agents."
         ),
 
@@ -37,5 +43,7 @@ def create_document_agent():
             "content rather than silently dropping those pages."
         ),
 
+        llm=llm,
         verbose=True,
+        allow_delegation=False,
     )
