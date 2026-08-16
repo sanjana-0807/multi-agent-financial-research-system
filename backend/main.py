@@ -8,6 +8,7 @@ from routes import auth
 from routes import research
 from routes import comparison
 from routes import documents
+from routes import extraction
 
 
 @asynccontextmanager
@@ -30,7 +31,7 @@ app.include_router(auth.router)
 app.include_router(research.router)
 app.include_router(comparison.router)
 app.include_router(documents.router)
-
+app.include_router(extraction.router)
 
 @app.get("/")
 def root():

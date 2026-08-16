@@ -1,15 +1,11 @@
-from decimal import Decimal
 from pydantic import BaseModel
-
-
-class Config:
-    from_attributes = True
+from typing import Optional
 
 
 class Ratios(BaseModel):
-    current_ratio: Decimal
-    debt_to_equity: Decimal
-    net_profit_margin: Decimal
+    current_ratio: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    net_profit_margin: Optional[float] = None
 
 
 class ExtractionResponse(BaseModel):
@@ -17,12 +13,17 @@ class ExtractionResponse(BaseModel):
     document_id: str
     company: str
     fiscal_year: int
-
-    revenue: Decimal
-    net_profit: Decimal
-    assets: Decimal
-    liabilities: Decimal
-    cash_flow: Decimal
-    eps: Decimal
-
+    revenue: Optional[float] = None
+    net_profit: Optional[float] = None
+    assets: Optional[float] = None
+    liabilities: Optional[float] = None
+    cash_flow: Optional[float] = None
+    eps: Optional[float] = None
     ratios: Ratios
+
+    class Config:
+        from_attributes = True
+
+
+class ExtractionRequest(BaseModel):
+    document_id: str
