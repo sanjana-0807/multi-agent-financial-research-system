@@ -19,3 +19,5 @@ __pycache__/
 # OS Files
 .DS_Store
 Thumbs.db
+# ChromaDB generated data
+vectorstore/chroma_data/

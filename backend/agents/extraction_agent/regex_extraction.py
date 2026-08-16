@@ -1,132 +1,478 @@
-"""
-Non-LLM financial statement extractor.
-Replaces the CrewAI/OpenAI extraction agent with deterministic regex parsing.
-
-Handles two known document styles, tried in order per field:
-  A) OCR-style label lines with "Rs." currency and Indian comma grouping
-     e.g. "Total Revenue .........ccccceeeeees Rs. 45,20,00,000"
-  B) Prose annual-report style with two-column ($FY_current $FY_prior) tables
-     e.g. "Revenue $412,600 $358,200" inside a
-     "Consolidated Statement of Operations ... Consolidated Balance Sheet" section
-
-Add more section/label patterns here as new document formats show up.
-"""
 import re
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
-def _num(raw: Optional[str]) -> Optional[float]:
-    """Strip commas/whitespace and convert to float/int. No unit scaling — extracted as-is."""
-    if raw is None:
+# ---------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------
+
+NUMBER_RE = re.compile(
+    r"""
+    (?:
+        \$\s*
+        |₹\s*
+        |Rs\.?\s*
+    )?
+    \(?\s*
+    -?
+    (?:\d{1,3}(?:,\d{3})+|\d+)
+    (?:\.\d+)?
+    \s*
+    (?:billion|million|thousand|bn|mn|m)?
+    \s*\)?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def parse_number(value: str) -> Optional[float]:
+    if not value:
         return None
-    cleaned = raw.replace(",", "").replace("$", "").strip()
-    if cleaned == "":
+
+    value = value.strip()
+
+    negative = value.startswith("(") and value.endswith(")")
+
+    value = re.sub(
+        r"^(?:\$|₹|Rs\.?)\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    multiplier = 1
+
+    lower = value.lower()
+
+    if "billion" in lower or re.search(r"\bbn\b", lower):
+        multiplier = 1_000_000_000
+    elif "million" in lower or re.search(r"\bmn\b", lower):
+        multiplier = 1_000_000
+    elif "thousand" in lower:
+        multiplier = 1_000
+
+    value = re.sub(
+        r"\b(?:billion|million|thousand|bn|mn|m)\b",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    value = (
+        value
+        .replace(",", "")
+        .replace("(", "")
+        .replace(")", "")
+        .strip()
+    )
+
+    try:
+        result = float(value) * multiplier
+        return -result if negative else result
+    except ValueError:
         return None
-    val = float(cleaned)
-    return int(val) if val.is_integer() else val
 
 
-def _find(pattern: str, text: str, flags=re.IGNORECASE) -> Optional[str]:
-    m = re.search(pattern, text, flags)
-    return m.group(1) if m else None
+# ---------------------------------------------------------
+# Extract numeric candidates
+# ---------------------------------------------------------
+
+def numeric_candidates(text: str):
+    results = []
+
+    for match in NUMBER_RE.finditer(text):
+        raw = match.group(0).strip()
+
+        value = parse_number(raw)
+
+        if value is None:
+            continue
+
+        # Ignore years
+        if 1900 <= abs(value) <= 2100:
+            continue
+
+        results.append((match.start(), match.end(), raw, value))
+
+    return results
 
 
-def _section(text: str, start_pat: str, end_pat: Optional[str]) -> str:
-    """Return the text between start_pat and end_pat (or end of string). Empty string if start not found."""
-    m_start = re.search(start_pat, text, re.IGNORECASE)
-    if not m_start:
-        return ""
-    start = m_start.end()
-    if end_pat:
-        m_end = re.search(end_pat, text[start:], re.IGNORECASE)
-        end = start + m_end.start() if m_end else len(text)
-    else:
-        end = len(text)
-    return text[start:end]
+# ---------------------------------------------------------
+# Statement-aware metric extraction
+# ---------------------------------------------------------
 
+def extract_table_value(
+    text: str,
+    labels: list[str],
+    search_distance: int = 1000,
+) -> Optional[float]:
 
-def extract_financial_data(document_text: str, metric_id: str, document_id: str) -> dict:
-    text = document_text
+    normalized = re.sub(r"[ \t]+", " ", text)
 
-    # ---------- Company name ----------
-    # Works for both "ACME INDUSTRIES LTD." and "Nova Orbital Technologies, Inc."
-    company = _find(
-        r"^(.*?\b(?:Ltd|Limited|Inc|Corp|Corporation|LLC|PLC)\.?)\b",
-        text,
+    candidates = []
+
+    for label in labels:
+
+        for match in re.finditer(
+            rf"\b{label}\b",
+            normalized,
+            re.IGNORECASE,
+        ):
+
+            start = match.end()
+            end = min(
+                len(normalized),
+                start + search_distance,
+            )
+
+            after = normalized[start:end]
+
+            # Stop at obvious narrative boundaries.
+            after = re.split(
+                r"\n\s*\n|(?=\b(?:The |Our |In 20\d{2}|We |This |These ))",
+                after,
+                maxsplit=1,
+            )[0]
+
+            numbers = numeric_candidates(after)
+
+            if not numbers:
+                continue
+
+            # Strong preference for a financial-table pattern:
+            # multiple numbers close together.
+            score = 0
+
+            if len(numbers) >= 2:
+                score += 5
+
+            if len(numbers) >= 3:
+                score += 3
+
+            # Currency markers strongly suggest a financial table.
+            if "$" in after or "₹" in after or "Rs." in after:
+                score += 3
+
+            # Percentage-heavy text is usually a chart,
+            # not the target financial statement.
+            percent_count = after.count("%")
+
+            if percent_count >= 2:
+                score -= 5
+
+            # Narrative phrases are weaker candidates.
+            if re.search(
+                r"\b(?:representing|compared to|decrease of|increase of)\b",
+                after,
+                re.IGNORECASE,
+            ):
+                score -= 4
+
+            candidates.append(
+                (
+                    score,
+                    numbers[0][3],
+                    after[:250],
+                )
+            )
+
+    if not candidates:
+        return None
+
+    # Highest-scoring candidate wins.
+    candidates.sort(
+        key=lambda x: x[0],
+        reverse=True,
     )
-    if company:
-        company = company.strip().rstrip(".") + "."
 
-    # ---------- Fiscal year ----------
-    fy_raw = (
-        _find(r"\bFY\s*[-:]?\s*(\d{4})\b", text)
-        or _find(r"Fiscal\s+Year\s*(?:ended\s+\w+\s+\d{1,2},\s*)?(\d{4})", text)
-    )
-    fiscal_year = int(fy_raw) if fy_raw else None
+    return candidates[0][1]
 
-    # ============================================================
-    # FORMAT A: OCR-style "Label ...dots... Rs. 12,34,567" lines
-    # ============================================================
-    revenue = _num(_find(r"Total\s+Revenue[\s\S]{0,80}?Rs\.?\s*([\d,]+)", text))
-    net_profit = _num(_find(r"Net\s+Profit(?!\s+Margin)[\s\S]{0,80}?Rs\.?\s*([\d,]+)", text))
-    assets = _num(_find(r"Total\s+Assets[\s\S]{0,80}?Rs\.?\s*([\d,]+)", text))
-    liabilities = _num(_find(r"Total\s+Liabilities[\s\S]{0,80}?Rs\.?\s*([\d,]+)", text))
-    cash_flow = _num(_find(r"Cash\s+Flow\s+from\s+Operations[\s\S]{0,80}?Rs\.?\s*([\d,]+)", text))
-    eps = _num(_find(r"Earnings\s+Per\s+Share\s*\(EPS\)[\s\S]{0,60}?Rs\.?\s*([\d]+\.?\d*)", text))
-    current_ratio = _num(_find(r"Current\s+Ratio[\s\S]{0,60}?([\d]+\.\d+)", text))
-    debt_to_equity = _num(_find(r"Debt\s+to\s+Equity\s+Ratio[\s\S]{0,60}?([\d]+\.\d+)", text))
-    net_profit_margin = _num(_find(r"Net\s+Profit\s+Margin[\s\S]{0,60}?([\d]+\.?\d*)\s*%", text))
 
-    current_assets = None
-    current_liabilities = None
+# ---------------------------------------------------------
+# Company
+# ---------------------------------------------------------
 
-    # ============================================================
-    # FORMAT B: prose annual-report style, two-column $ tables
-    # ============================================================
-    ops_section = _section(
-        text,
-        r"Consolidated\s+Statement\s+of\s+Operations",
-        r"Consolidated\s+Balance\s+Sheet",
-    )
-    bs_section = _section(
-        text,
-        r"Consolidated\s+Balance\s+Sheet",
-        r"Consolidated\s+Statement\s+of\s+Cash\s+Flows",
-    )
-    cf_section = _section(
-        text,
-        r"Consolidated\s+Statement\s+of\s+Cash\s+Flows",
-        r"Management.?s\s+Discussion",
-    )
+def extract_company(text: str) -> Optional[str]:
+    """
+    Dynamically extract the company name from an annual report.
 
-    if revenue is None:
-        revenue = _num(_find(r"\bRevenue\s+\$([\d,]+)\s+\$[\d,]+", ops_section))
-    if net_profit is None:
-        net_profit = _num(_find(r"\bNet\s+income\s+\$([\d,]+)\s+\$[\d,]+", ops_section))
-    if eps is None:
-        eps = _num(_find(r"Diluted\s+earnings\s+per\s+share\s+\$([\d,]+\.?\d*)\s+\$[\d,]+\.?\d*", ops_section))
+    This function does not contain company-specific rules.
+    """
 
-    if assets is None:
-        assets = _num(_find(r"Total\s+assets\s+\$([\d,]+)\s+\$[\d,]+", bs_section))
-    if liabilities is None:
-        liabilities = _num(_find(r"Total\s+liabilities\s+\$([\d,]+)\s+\$[\d,]+", bs_section))
-    current_assets = _num(_find(r"Total\s+current\s+assets\s+\$([\d,]+)\s+\$[\d,]+", bs_section))
-    current_liabilities = _num(_find(r"Total\s+current\s+liabilities\s+\$([\d,]+)\s+\$[\d,]+", bs_section))
+    if not text:
+        return None
 
-    if cash_flow is None:
-        cash_flow = _num(
-            _find(r"Net\s+cash\s+provided\s+by\s+operating\s+activities\s+\$([\d,]+)\s+\$?[\(\-]?[\d,]+", cf_section)
+    text = text[:30000]
+
+    patterns = [
+        # -----------------------------------------------------
+        # SEC registrant format
+        # -----------------------------------------------------
+        r"""
+        (?:Exact\s+name\s+of\s+registrant
+        |Exact\s+name\s+of\s+registrant\s+as\s+specified\s+in\s+its\s+charter)
+        \s*[:\-]?\s*
+        ([A-Z][A-Za-z0-9&.,'’\- ]{2,100}?)
+        (?:
+            \s*\(|\s*
+            Commission\s+File\s+Number|
+            \s+I\.R\.S\.|
+            \s+IRS
+        )
+        """,
+
+        # -----------------------------------------------------
+        # Company & Consolidated Subsidiaries
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \s*(?:&|and)\s+
+        (?:Consolidated\s+)?(?:Subsidiaries|Companies)
+        \b
+        """,
+
+        # -----------------------------------------------------
+        # Company and Subsidiaries
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \s+(?:and|&)
+        \s+(?:Consolidated\s+)?Subsidiaries
+        \b
+        """,
+
+        # -----------------------------------------------------
+        # Generic legal company name
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \b
+        """,
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE | re.VERBOSE,
         )
 
-    # ---------- Ratios: use stated values, else compute ----------
-    if current_ratio is None and current_assets and current_liabilities:
-        current_ratio = round(current_assets / current_liabilities, 2)
+        if match:
 
-    if debt_to_equity is None and liabilities is not None and assets is not None and (assets - liabilities) != 0:
-        debt_to_equity = round(liabilities / (assets - liabilities), 2)
+            company = match.group(1).strip()
 
-    if net_profit_margin is None and net_profit is not None and revenue not in (None, 0):
-        net_profit_margin = round((net_profit / revenue) * 100, 2)
+            company = re.sub(
+                r"\s+",
+                " ",
+                company,
+            )
+
+            company = company.rstrip(
+                " .,;:"
+            )
+
+            return company
+
+    return None
+
+# ---------------------------------------------------------
+# Fiscal year
+# ---------------------------------------------------------
+
+def extract_fiscal_year(text: str) -> Optional[int]:
+
+    patterns = [
+        r"fiscal year ended.*?\b(20\d{2})\b",
+        r"year ended.*?\b(20\d{2})\b",
+        r"\b(20\d{2})\s+Annual Report\b",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+             pattern,
+               text,
+                 re.IGNORECASE | re.DOTALL,
+        )
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+# ---------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------
+
+def extract_revenue(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Total revenues",
+            r"Total revenue",
+            r"Net sales",
+            r"Net revenues",
+            r"Total net sales",
+        ],
+    )
+
+
+def extract_net_profit(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Net income attributable to common stockholders",
+            r"Net income attributable to .*?stockholders",
+            r"Net income attributable to .*?shareholders",
+            r"Net income",
+            r"Net earnings",
+            r"Net profit",
+        ],
+    )
+
+
+def extract_assets(text: str):
+
+    return extract_table_value(
+        text,
+        [r"Total assets"],
+        search_distance=500,
+    )
+
+
+def extract_liabilities(text: str):
+
+    return extract_table_value(
+        text,
+        [r"Total liabilities"],
+        search_distance=500,
+    )
+
+
+def extract_cash_flow(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Net cash provided by operating activities",
+            r"Net cash provided by operations",
+            r"Cash provided by operating activities",
+            r"Operating cash flow",
+        ],
+        search_distance=500,
+    )
+
+
+def extract_eps(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Diluted earnings per share",
+            r"Basic earnings per share",
+            r"Earnings per share",
+            r"Diluted EPS",
+            r"Basic EPS",
+        ],
+        search_distance=500,
+    )
+
+
+def extract_current_ratio(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Current ratio",
+        ],
+        search_distance=100,
+    )
+
+
+def extract_debt_to_equity(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Debt-to-equity ratio",
+            r"Debt to equity ratio",
+            r"Debt/equity ratio",
+        ],
+        search_distance=100,
+    )
+
+
+# ---------------------------------------------------------
+# Main extraction function
+# ---------------------------------------------------------
+
+def extract_financial_data(
+    document_text: str,
+    metric_id: str,
+    document_id: str,
+) -> Dict[str, Any]:
+
+    if not document_text:
+        return {
+            "metric_id": metric_id,
+            "document_id": document_id,
+            "company": None,
+            "fiscal_year": None,
+            "revenue": None,
+            "net_profit": None,
+            "assets": None,
+            "liabilities": None,
+            "cash_flow": None,
+            "eps": None,
+            "ratios": {
+                "current_ratio": None,
+                "debt_to_equity": None,
+                "net_profit_margin": None,
+            },
+        }
+
+    company = extract_company(document_text)
+
+    fiscal_year = extract_fiscal_year(document_text)
+
+    revenue = extract_revenue(document_text)
+
+    net_profit = extract_net_profit(document_text)
+
+    assets = extract_assets(document_text)
+
+    liabilities = extract_liabilities(document_text)
+
+    cash_flow = extract_cash_flow(document_text)
+
+    eps = extract_eps(document_text)
+
+    current_ratio = extract_current_ratio(document_text)
+
+    debt_to_equity = extract_debt_to_equity(document_text)
+
+    if revenue is not None and revenue != 0 and net_profit is not None:
+        net_profit_margin = (
+            net_profit / revenue
+        ) * 100
+    else:
+        net_profit_margin = None
 
     return {
         "metric_id": metric_id,
@@ -145,55 +491,3 @@ def extract_financial_data(document_text: str, metric_id: str, document_id: str)
             "net_profit_margin": net_profit_margin,
         },
     }
-
-
-if __name__ == "__main__":
-    import json
-
-    acme = (
-        "ACME INDUSTRIES LTD. Annual Financial Report - FY 2025 Statement of "
-        "Financial Position (Scanned Copy) Total Revenue .........ccccceeeeees Rs. "
-        "45,20,00,000 Net Profit .............ccceceeeeeee Rs. 6,75,00,000 Total "
-        "Assets .......ccceeee ee eeee Rs. 1,20,00,00,000 Total Liabilities "
-        "........0000.00. Rs. 55,00,00,000 Cash Flow from Operations .......... Rs. "
-        "8,10,00,000 Earnings Per Share (EPS) ........... Rs. 12.45 Current Ratio' "
-        "sceccerccreeeees 1.85 Debt to Equity Ratio ................ 0.62 Net "
-        "Profit Margin ................0. 14.9%"
-    )
-
-    nova = (
-        "Nova Orbital Technologies, Inc. Annual Report and Financial Statements — "
-        "Fiscal Year 2025 Company Overview Nova Orbital Technologies, Inc. designs, "
-        "manufactures, and launches small-satellite communication systems. "
-        "Consolidated Statement of Operations For the fiscal years ended December 31, "
-        "2025 and 2024 (in thousands, except per-share data) FY2025 FY2024 Revenue "
-        "$412,600 $358,200 Cost of revenue $243,700 $204,200 Gross profit $168,900 "
-        "$154,000 Research and development $58,400 $47,900 Selling, general and "
-        "administrative $52,100 $44,300 Restructuring charges $9,800 $0 Operating "
-        "income $48,600 $61,800 Interest expense, net $14,200 $6,100 Income before "
-        "income taxes $34,400 $55,700 Provision for income taxes $3,000 $12,900 Net "
-        "income $31,400 $42,800 Basic earnings per share $0.91 $1.24 Diluted earnings "
-        "per share $0.87 $1.19 Weighted average diluted shares outstanding 36,092 "
-        "35,966 Segment Revenue Segment FY2025 FY2024 Satellite Systems $298,100 "
-        "$246,500 Ground Infrastructure $114,500 $111,700 Total Revenue $412,600 "
-        "$358,200 Consolidated Balance Sheet As of December 31, 2025 and 2024 (in "
-        "thousands) FY2025 FY2024 Cash and cash equivalents $62,300 $88,100 Accounts "
-        "receivable, net $71,400 $58,900 Inventory $54,200 $41,600 Total current "
-        "assets $187,900 $188,600 Property, plant and equipment, net $210,800 "
-        "$186,300 Goodwill and intangible assets $95,400 $97,100 Total assets "
-        "$494,100 $472,000 Accounts payable $48,600 $39,200 Current portion of "
-        "long-term debt $22,000 $14,500 Total current liabilities $70,600 $53,700 "
-        "Long-term debt $188,300 $128,200 Total liabilities $258,900 $181,900 Total "
-        "stockholders' equity $235,200 $290,100 Total liabilities and stockholders' "
-        "equity $494,100 $472,000 Consolidated Statement of Cash Flows (Summary) "
-        "FY2025 FY2024 Net cash provided by operating activities $46,200 $71,500 Net "
-        "cash used in investing activities ($58,900) ($39,200) Net cash provided by "
-        "(used in) financing activities ($13,100) $18,400 Net increase (decrease) in "
-        "cash ($25,800) $50,700 Management's Discussion and Analysis Total debt "
-        "increased 47.4%..."
-    )
-
-    print("=== ACME ===")
-    print(json.dumps(extract_financial_data(acme, "M001", "D1B8D3D4D"), indent=2))
-    print("\n=== NOVA ORBITAL ===")
-    print(json.dumps(extract_financial_data(nova, "M001", "D9320B3EF"), indent=2))
