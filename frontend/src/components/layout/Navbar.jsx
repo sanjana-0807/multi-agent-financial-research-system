@@ -2,9 +2,12 @@ import { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { LogOut, Bell, Search, User, Sparkles, X, ArrowRight, FileText, ShieldAlert, BarChart2, MessageSquare, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { useAuth } from '../../features/auth/useAuth.js'
+import { useWorkspace } from '../../context/WorkspaceContext.jsx'
 
 function Navbar() {
   const { isAuthenticated, logout } = useAuth()
+  const { extractionData } = useWorkspace()
+  const sessionLabel = extractionData ? `${extractionData.company} FY ${extractionData.fiscal_year}` : 'No Active Session'
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -73,7 +76,7 @@ function Navbar() {
 
         <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-semibold border border-blue-200/80 ml-2">
           <Sparkles size={12} className="text-blue-600 animate-pulse" />
-          <span>Active Session: Tesla FY 2025</span>
+          <span>Active Session: {sessionLabel}</span>
         </div>
       </div>
 
@@ -106,25 +109,35 @@ function Navbar() {
             <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl border border-slate-200 shadow-2xl p-4 z-40 space-y-3 animate-fadeIn">
               <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                 <span className="text-xs font-bold text-slate-900 uppercase tracking-wider">System Notifications</span>
-                <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">2 New</span>
+                <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                  {extractionData?.company ? '2 New' : '0 New'}
+                </span>
               </div>
 
               <div className="space-y-2 text-xs">
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-start gap-2.5">
-                  <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-bold text-slate-800">10-K Parsing Complete</div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">Tesla FY 2025 document indexed in ChromaDB vector store.</div>
-                  </div>
-                </div>
+                {extractionData?.company ? (
+                  <>
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-start gap-2.5">
+                      <CheckCircle2 size={16} className="text-emerald-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-bold text-slate-800">Disclosure Parsing Complete</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">{sessionLabel} document indexed in vector store.</div>
+                      </div>
+                    </div>
 
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-start gap-2.5">
-                  <Sparkles size={16} className="text-blue-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-bold text-slate-800">RAG Vector Agent Ready</div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">Ready to answer financial questions for active session.</div>
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-start gap-2.5">
+                      <Sparkles size={16} className="text-blue-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <div className="font-bold text-slate-800">Extraction Agent Active</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">KPI metrics and financial ratios extracted.</div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="p-4 text-center text-slate-400 text-xs">
+                    No new system notifications.
                   </div>
-                </div>
+                )}
               </div>
             </div>
           )}

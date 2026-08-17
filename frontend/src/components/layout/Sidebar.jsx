@@ -6,12 +6,12 @@ import {
 } from 'lucide-react'
 
 const navItems = [
-  { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { name: 'Upload', path: '/upload', icon: Upload },
-  { name: 'Sessions', path: '/sessions', icon: Clock },
+  { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
   { name: 'Upload History', path: '/upload-history', icon: History },
   { name: 'Metrics', path: '/metrics', icon: BarChart3 },
   { name: 'Ratios', path: '/ratios', icon: Percent },
+  { name: 'Sessions', path: '/sessions', icon: Clock },
   { name: 'Chat', path: '/chat', icon: MessageSquare },
   { name: 'Red Flags', path: '/red-flags', icon: AlertTriangle },
   { name: 'Comparison', path: '/comparison', icon: GitCompare },
