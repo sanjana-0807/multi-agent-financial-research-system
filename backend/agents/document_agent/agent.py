@@ -1,10 +1,13 @@
+import os
 from crewai import Agent, LLM
 
 
 # Use local Ollama model instead of OpenAI/Anthropic
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+
 llm = LLM(
     model="ollama/llama3.2:latest",
-    base_url="http://localhost:11434",
+    base_url=OLLAMA_BASE_URL,
 )
 
 

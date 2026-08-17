@@ -1,90 +1,53 @@
+# agents/red_flag_agent/tasks.py
 from crewai import Task
 
+AUDITOR_TASK_DESCRIPTION = """
+You are given excerpts retrieved from a company's financial filing
+(auditor's report and/or related notes). Each excerpt is labeled with
+its page number.
 
-def create_red_flag_task(agent):
-    """
-    Creates the CrewAI task for financial red flag detection.
-    """
+Excerpts:
+---
+{document_text}
+---
 
+Classify ONLY what is explicitly stated in these excerpts. Look for:
+- Qualified or adverse audit opinions
+- Going-concern language / substantial doubt about continuing as a
+  going concern
+- Material weaknesses in internal control over financial reporting
+- Material uncertainties or significant audit observations
+
+Respond with ONLY valid JSON (no markdown fences, no commentary
+before or after) in exactly this shape:
+
+{{
+  "findings": [
+    {{
+      "title": "short title",
+      "severity": "LOW" | "MEDIUM" | "HIGH",
+      "explanation": "why this matters, in your own words",
+      "evidence": "short paraphrase of the relevant excerpt (not a verbatim quote)",
+      "page_number": <integer or null>
+    }}
+  ]
+}}
+
+If the excerpts do not contain any qualification, going-concern
+language, or material weakness disclosure, return:
+
+{{"findings": []}}
+
+Never invent a finding that is not supported by the excerpts above.
+"""
+
+
+def create_red_flag_task(agent, document_text: str):
     return Task(
-        description="""
-Analyze the financial information provided from the company's
-financial reports.
-
-Identify important financial red flags in these categories:
-
-1. Rising Debt
-   - Increasing total debt
-   - Increasing borrowings
-   - Increasing leverage
-   - Increasing interest burden
-
-2. Falling Margins
-   - Declining gross margin
-   - Declining operating margin
-   - Declining net profit margin
-   - Increasing costs relative to revenue
-
-3. Cash Flow Issues
-   - Declining operating cash flow
-   - Negative operating cash flow
-   - Significant difference between profit and operating cash flow
-   - Liquidity concerns
-
-4. Auditor Remarks
-   - Qualified audit opinions
-   - Going-concern concerns
-   - Material uncertainties
-   - Significant audit observations
-   - Internal control weaknesses
-
-5. Financial Risks
-   - Liquidity risk
-   - Debt or credit risk
-   - Foreign exchange risk
-   - Customer concentration risk
-   - Commodity/raw-material risk
-   - Regulatory or legal financial risks
-   - Other material financial risks
-
-For every detected red flag:
-
-- Identify the category.
-- Give a short title.
-- Explain the issue.
-- Provide supporting evidence.
-- Include the page number when available.
-- Assign severity: LOW, MEDIUM, or HIGH.
-- Never invent financial numbers or facts.
-
-If there is insufficient evidence for a category, explicitly state
-that no confirmed red flag was identified.
-
-Distinguish clearly between confirmed findings and potential concerns.
-""",
-
-        expected_output="""
-A structured financial red flag assessment containing:
-
-- Overall risk assessment
-- Rising Debt findings
-- Falling Margins findings
-- Cash Flow Issues findings
-- Auditor Remarks findings
-- Financial Risks findings
-
-Each finding should contain:
-
-- Category
-- Title
-- Severity
-- Explanation
-- Evidence
-- Page number when available
-
-The assessment must be based only on the provided financial information
-and must not contain unsupported claims.
-""",
-
+        description=AUDITOR_TASK_DESCRIPTION.format(document_text=document_text),
+        expected_output=(
+            "A single valid JSON object with a 'findings' array, and "
+            "nothing else."
+        ),
         agent=agent,
     )

@@ -9,7 +9,7 @@ from models.user import User
 from models.company import Company
 from models.comparison_result import ComparisonResult
 from models.document import DocumentModel
-
+from models.red_flag import RedFlagResult
 
 client: AsyncIOMotorClient | None = None
 
@@ -32,5 +32,6 @@ async def init_db():
             Company,
             ComparisonResult,
             DocumentModel,
+            RedFlagResult,
         ],
     )

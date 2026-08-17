@@ -1,46 +1,45 @@
+# agents/red_flag_agent/agent.py
+import os
 from crewai import Agent, LLM
-
-
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 llm = LLM(
     model="ollama/llama3.2:latest",
-    base_url="http://localhost:11434",
+    base_url=OLLAMA_BASE_URL,
 )
 
 
 def create_red_flag_agent():
     """
-    Creates the CrewAI Red Flag Agent.
+    CrewAI agent scoped ONLY to classifying auditor remarks and
+    going-concern language from retrieved document text.
 
-    Responsibilities:
-    - Detect rising debt
-    - Detect falling margins
-    - Detect cash flow issues
-    - Identify auditor remarks
-    - Identify financial risks
+    Numeric red flags (rising debt, falling margins, cash flow issues,
+    other financial risk) are handled deterministically by
+    agents/red_flag_agent/rules.py -- this agent never sees numeric
+    metrics and must not invent them. It only classifies text that
+    was actually retrieved from the filing.
     """
-
     return Agent(
-        role="Financial Red Flag Detection Agent",
-
+        role="Auditor Remarks Classification Specialist",
         goal=(
-            "Analyze extracted financial information from company reports "
-            "and identify significant financial red flags including rising "
-            "debt, falling margins, cash flow issues, auditor remarks, and "
-            "other financial risks. Every finding must be supported by "
-            "evidence from the provided financial information."
+            "Read the provided excerpts from a company's audit report "
+            "and related notes, and classify whether they contain a "
+            "qualified opinion, going-concern language, a material "
+            "weakness disclosure, or other significant audit "
+            "observations. Base every finding strictly on the "
+            "provided text -- never infer or invent findings not "
+            "present in it."
         ),
-
         backstory=(
-            "You are a financial risk analysis specialist working inside "
-            "a multi-agent financial research system. You examine financial "
-            "statements, extracted metrics, management commentary, auditor "
-            "observations, and financial trends to identify potential "
-            "warning signs. You never invent financial facts and you "
-            "distinguish between confirmed risks and potential concerns."
+            "You are a specialist reviewer who reads auditor's "
+            "reports and financial statement notes to identify audit "
+            "qualifications and going-concern disclosures. You are "
+            "conservative: if the text does not clearly support a "
+            "finding, you report that no confirmed finding was "
+            "identified rather than guessing."
         ),
-
         llm=llm,
         verbose=True,
         allow_delegation=False,
-        max_iter=10,
+        max_iter=5,
     )
