@@ -1,5 +1,6 @@
 import os
 import re
+from typing import Optional
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -27,7 +28,11 @@ class DocumentService:
     CHUNK_OVERLAP = 200
 
     @classmethod
-    async def process_upload(cls, file: UploadFile):
+    async def process_upload(
+        cls,
+        file: UploadFile,
+        company_id: Optional[str] = None,
+    ):
 
         # 1. Validate file
         if not file.filename:
@@ -232,6 +237,7 @@ class DocumentService:
             chunk_count=len(chunks),
             ocr_used=ocr_used,
             ocr_page_count=ocr_page_count,
+            company_id=company_id,
             status="indexed",
             created_at=now,
             updated_at=now
@@ -329,3 +335,30 @@ class DocumentService:
             "documents": result.get("documents", []),
             "metadatas": result.get("metadatas", [])
         }
+
+    @classmethod
+    async def get_latest_for_company(
+        cls,
+        company_id: str,
+    ) -> Optional[DocumentModel]:
+        """
+        Most recently indexed document linked to a company. Used by the
+        Comparison Agent to decide which document to extract metrics
+        from when a company has more than one uploaded filing.
+        """
+        return await DocumentModel.find(
+            DocumentModel.company_id == company_id,
+            DocumentModel.status == "indexed",
+        ).sort("-created_at").first_or_none()
+
+    @classmethod
+    async def link_company(
+        cls,
+        document_id: str,
+        company_id: str,
+    ) -> DocumentModel:
+        document = await cls.get_document(document_id)
+        document.company_id = company_id
+        document.updated_at = datetime.now(timezone.utc)
+        await document.save()
+        return document

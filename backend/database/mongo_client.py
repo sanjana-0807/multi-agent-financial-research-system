@@ -18,7 +18,10 @@ async def init_db():
     global client
 
     client = AsyncIOMotorClient(
-        settings.MONGODB_URL
+        settings.MONGODB_URL,
+        connectTimeoutMS=30000,
+        serverSelectionTimeoutMS=30000,
+        socketTimeoutMS=30000,
     )
 
     database = client[
