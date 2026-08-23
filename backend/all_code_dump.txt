@@ -1,0 +1,6218 @@
+﻿import asyncio
+
+from database.mongo_client import init_db
+from models.document import DocumentModel
+
+
+async def main():
+    await init_db()
+
+    documents = await DocumentModel.find_all().to_list()
+
+    print("MongoDB documents:", len(documents))
+
+    for document in documents:
+        print(
+            document.document_id,
+            "|",
+            document.filename,
+            "|",
+            document.status,
+            "| chunks:",
+            document.chunk_count
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+from database.mongo_client import init_db
+
+from routes import companies
+from routes import auth
+from routes import research
+from routes import comparison
+from routes import documents
+from routes import extraction
+from routes import red_flag
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: connect to MongoDB and initialize Beanie document models
+    await init_db()
+    yield
+
+
+app = FastAPI(
+    title="Multi-Agent Financial Research System",
+    description="Backend API for Multi-Agent Financial Research System",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(companies.router)
+app.include_router(auth.router)
+app.include_router(research.router)
+app.include_router(comparison.router)
+app.include_router(documents.router)
+app.include_router(extraction.router)
+app.include_router(red_flag.router)
+
+@app.get("/")
+def root():
+    return {
+        "message": "Welcome to Multi-Agent Financial Research System Backend"
+    }
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy"
+    }
+from database.connection import mongodb
+
+print("Database Connected Successfully!")
+
+print(
+    mongodb.db.list_collection_names()
+)
+from crewai import Agent
+
+
+def create_financial_research_agent():
+    return Agent(
+        role="Financial Research Analyst",
+        goal="Analyze financial reports and extract meaningful insights.",
+        backstory=(
+            "You are an expert financial analyst specialized in reading "
+            "annual reports, balance sheets, income statements, and cash "
+            "flow statements to generate useful insights."
+        ),
+        verbose=True,
+    )
+
+
+def create_red_flag_agent():
+    return Agent(
+        role="Financial Risk Analyst",
+        goal="Identify financial red flags and potential risks.",
+        backstory=(
+            "You are responsible for detecting accounting anomalies, "
+            "financial inconsistencies, and possible risk indicators."
+        ),
+        verbose=True,
+    )
+
+
+def create_comparison_agent():
+    return Agent(
+        role="Company Comparison Analyst",
+        goal="Compare multiple companies using extracted financial metrics.",
+        backstory=(
+            "You compare financial performance across companies using "
+            "ratios, profitability, liquidity, and growth metrics."
+        ),
+        verbose=True,
+    )
+from crewai import Crew
+
+from agents.agent_config import (
+    create_financial_research_agent,
+    create_red_flag_agent,
+    create_comparison_agent,
+)
+
+
+def build_financial_research_crew():
+
+    financial_agent = create_financial_research_agent()
+    red_flag_agent = create_red_flag_agent()
+    comparison_agent = create_comparison_agent()
+
+    crew = Crew(
+        agents=[
+            financial_agent,
+            red_flag_agent,
+            comparison_agent,
+        ],
+        tasks=[],
+        verbose=True,
+    )
+
+    return crew
+import os
+from crewai import Agent, LLM
+
+
+# Use local Ollama model instead of OpenAI/Anthropic
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+
+llm = LLM(
+    model="ollama/llama3.2:latest",
+    base_url=OLLAMA_BASE_URL,
+)
+
+
+def create_document_agent():
+    """
+    Create the Document Agent.
+
+    Responsibilities:
+    - Validate uploaded documents
+    - Parse PDF documents
+    - Extract text
+    - OCR pages that have no extractable text layer
+    - Chunk extracted text
+    - Generate embeddings
+    - Store vectors in ChromaDB
+    - Store document metadata in MongoDB
+    """
+
+    return Agent(
+        role="Document Processing Agent",
+
+        goal=(
+            "Process financial research documents by extracting their text, "
+            "creating meaningful chunks, generating embeddings, and indexing "
+            "the document content for downstream financial research agents."
+        ),
+
+        backstory=(
+            "You are a document processing specialist for a financial "
+            "research system. You prepare financial reports for downstream "
+            "AI agents by converting uploaded documents into searchable "
+            "vector representations while preserving page and document "
+            "metadata. Many annual reports and filings include scanned "
+            "pages, signature pages, or image-based tables with no "
+            "underlying text layer, so you use OCR to recover their "
+            "content rather than silently dropping those pages."
+        ),
+
+        llm=llm,
+        verbose=True,
+        allow_delegation=False,
+    )
+from crewai import Crew
+
+from agents.document_agent.agent import create_document_agent
+from agents.document_agent.tasks import create_document_task
+
+
+def create_document_crew():
+    """
+    Create the CrewAI crew responsible for document processing.
+    """
+
+    document_agent = create_document_agent()
+
+    document_task = create_document_task(
+        document_agent
+    )
+
+    crew = Crew(
+        agents=[document_agent],
+        tasks=[document_task],
+        verbose=True,
+    )
+
+    return crew
+from crewai import Task
+
+
+def create_document_task(agent):
+    """
+    Create the CrewAI task for document processing.
+    """
+
+    return Task(
+        description=(
+            "Process a financial document for downstream research. "
+            "The document must be parsed and its text extracted from "
+            "the native PDF text layer where available; any page with "
+            "no usable text layer (e.g. a scanned page or image-based "
+            "table) must be OCR'd instead of being skipped. The "
+            "resulting text must be split into meaningful overlapping "
+            "chunks, embeddings generated, and the chunks indexed in "
+            "the vector database. Document metadata -- including "
+            "whether OCR was required and how many pages it was applied "
+            "to -- must also be stored for retrieval."
+        ),
+
+        expected_output=(
+            "A successful document processing result containing "
+            "the document ID, filename, page count, chunk count, "
+            "embedding status, vector database status, whether OCR "
+            "was used, the number of OCR'd pages, and overall "
+            "indexing status."
+        ),
+
+        agent=agent,
+    )
+from agents.document_agent.agent import create_document_agent
+from agents.document_agent.tasks import create_document_task
+from agents.document_agent.crew import create_document_crew
+
+__all__ = [
+    "create_document_agent",
+    "create_document_task",
+    "create_document_crew",
+]
+from vectorstore.chroma_client import collection
+
+
+def fetch_document_text(document_id: str):
+    """
+    Pulls every chunk stored for a document and reassembles them in
+    original reading order (by page, then chunk_index within the page).
+
+    NOTE: for very large documents (see the earlier OCR/embedding work --
+    a few hundred pages can produce 1000+ chunks), this reassembles the
+    ENTIRE document into a single string that then gets embedded in one
+    LLM prompt. That can hit the model's context window limit or become
+    slow/expensive for very large filings. If this becomes a problem in
+    practice, consider extracting per-section (e.g. only the financial
+    statements pages) rather than the whole document, or summarizing
+    chunks first.
+    """
+    result = collection.get(
+        where={"document_id": document_id},
+        include=["documents", "metadatas"],
+    )
+
+    ids = result.get("ids", [])
+    if not ids:
+        return None
+
+    documents = result.get("documents", [])
+    metadatas = result.get("metadatas", [])
+
+    paired = list(zip(documents, metadatas))
+    paired.sort(key=lambda item: (item[1]["page"], item[1]["chunk_index"]))
+
+    return "\n\n".join(text for text, _ in paired)
+# agents/extraction_agent/financial_section_selector.py
+
+"""
+Generic Financial Statement Section Selector
+
+Purpose
+-------
+Locate the ACTUAL financial statement tables inside arbitrary
+annual reports.
+
+This module is intentionally company-independent.
+
+It does NOT contain:
+    - Tesla-specific rules
+    - Colgate-specific rules
+    - PepsiCo-specific rules
+    - Johnson & Johnson-specific rules
+
+Strategy
+--------
+1. Find candidate statement headings.
+2. Examine a window after every candidate.
+3. Score each candidate using:
+       - financial row keywords
+       - year columns
+       - numerical density
+       - statement-specific terminology
+       - table structure
+4. Penalize:
+       - table of contents
+       - narrative text
+       - MD&A discussion
+       - very sparse candidates
+5. Select the strongest candidate.
+6. Trim the selected text to the actual statement region.
+
+The result is suitable for downstream deterministic extraction.
+"""
+
+import re
+from typing import Dict, List, Optional, Tuple
+
+
+# ============================================================
+# TEXT NORMALIZATION
+# ============================================================
+
+def _normalize_text(text: str) -> str:
+    """
+    Normalize PDF-extracted text while preserving useful
+    financial information.
+    """
+
+    if not text:
+        return ""
+
+    replacements = {
+        "\u00a0": " ",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\ufb01": "fi",
+        "\ufb02": "fl",
+        "\u00a0": " ",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # Remove repeated whitespace but preserve newlines.
+    text = re.sub(r"[ \t]+", " ", text)
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+# ============================================================
+# GENERIC HEADING PATTERNS
+# ============================================================
+
+INCOME_HEADINGS = [
+    r"consolidated\s+statements?\s+of\s+earnings",
+    r"consolidated\s+statements?\s+of\s+income",
+    r"consolidated\s+statements?\s+of\s+operations",
+    r"consolidated\s+income\s+statements?",
+    r"statements?\s+of\s+earnings",
+    r"statements?\s+of\s+income",
+    r"statements?\s+of\s+operations",
+    r"income\s+statements?",
+    r"statement\s+of\s+profit\s+and\s+loss",
+    r"statements?\s+of\s+profit\s+and\s+loss",
+    r"consolidated\s+statements?\s+of\s+profit\s+and\s+loss",
+]
+
+BALANCE_HEADINGS = [
+    r"consolidated\s+balance\s+sheets?",
+    r"consolidated\s+balance\s+sheet",
+    r"balance\s+sheets?",
+    r"balance\s+sheet",
+    r"consolidated\s+statements?\s+of\s+financial\s+position",
+    r"statements?\s+of\s+financial\s+position",
+    r"financial\s+position",
+]
+
+CASH_FLOW_HEADINGS = [
+    r"consolidated\s+statements?\s+of\s+cash\s+flows?",
+    r"statements?\s+of\s+cash\s+flows?",
+    r"statement\s+of\s+cash\s+flows?",
+    r"consolidated\s+cash\s+flow\s+statements?",
+    r"cash\s+flow\s+statements?",
+]
+
+
+# ============================================================
+# STATEMENT-SPECIFIC ROW KEYWORDS
+# ============================================================
+
+INCOME_KEYWORDS = [
+    "revenue",
+    "net revenue",
+    "net sales",
+    "sales to customers",
+    "sales",
+    "cost of sales",
+    "cost of products sold",
+    "cost of revenues",
+    "cost of revenue",
+    "gross profit",
+    "gross margin",
+    "operating income",
+    "operating profit",
+    "income from operations",
+    "income before income taxes",
+    "income before taxes",
+    "earnings before taxes",
+    "provision for income taxes",
+    "income tax expense",
+    "net income",
+    "net earnings",
+    "net income attributable",
+    "net earnings attributable",
+    "earnings per share",
+    "earnings per common share",
+    "diluted",
+    "basic",
+]
+
+BALANCE_KEYWORDS = [
+    "assets",
+    "current assets",
+    "total current assets",
+    "cash and cash equivalents",
+    "accounts receivable",
+    "inventories",
+    "property, plant and equipment",
+    "goodwill",
+    "intangible assets",
+    "total assets",
+    "liabilities",
+    "current liabilities",
+    "total current liabilities",
+    "accounts payable",
+    "long-term debt",
+    "total liabilities",
+    "shareholders' equity",
+    "stockholders' equity",
+    "shareholders equity",
+    "stockholders equity",
+    "total equity",
+    "total liabilities and equity",
+]
+
+CASH_FLOW_KEYWORDS = [
+    "cash flows from operating activities",
+    "cash flow from operating activities",
+    "operating activities",
+    "net cash provided by operating activities",
+    "net cash provided by operations",
+    "net cash flows from operating activities",
+    "cash flows from investing activities",
+    "investing activities",
+    "cash flows from financing activities",
+    "financing activities",
+    "depreciation and amortization",
+    "capital expenditures",
+    "capital spending",
+    "net cash used in investing activities",
+    "net cash used in financing activities",
+    "net increase in cash",
+    "cash and cash equivalents at end",
+]
+
+
+# ============================================================
+# YEAR DETECTION
+# ============================================================
+
+YEAR_PATTERN = re.compile(
+    r"\b(?:19|20)\d{2}\b"
+)
+
+
+def _count_years(text: str) -> int:
+    """
+    Count distinct years.
+
+    Actual financial tables usually contain two or more
+    reporting years.
+    """
+
+    years = set(
+        YEAR_PATTERN.findall(text)
+    )
+
+    return len(years)
+
+
+# ============================================================
+# NUMBER DETECTION
+# ============================================================
+
+NUMBER_PATTERN = re.compile(
+    r"""
+    (?:
+        \(?
+        -?
+        (?:
+            \d{1,3}(?:,\d{3})+
+            |
+            \d+
+        )
+        (?:\.\d+)?
+        %?
+        \)?
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _count_numbers(text: str) -> int:
+    return len(
+        NUMBER_PATTERN.findall(text)
+    )
+
+
+# ============================================================
+# FINANCIAL KEYWORD COUNT
+# ============================================================
+
+def _count_keywords(
+    text: str,
+    keywords: List[str],
+) -> int:
+
+    lowered = text.lower()
+
+    score = 0
+
+    for keyword in keywords:
+
+        if keyword.lower() in lowered:
+            score += 1
+
+    return score
+
+
+# ============================================================
+# NARRATIVE PENALTIES
+# ============================================================
+
+NARRATIVE_MARKERS = [
+    "management's discussion",
+    "managementâ€™s discussion",
+    "liquidity and capital resources",
+    "critical accounting",
+    "risk factors",
+    "business overview",
+    "legal proceedings",
+    "restructuring",
+    "the company expects",
+    "we expect",
+    "our strategy",
+    "our business",
+    "outlook",
+    "competition",
+    "market conditions",
+    "this discussion",
+]
+
+
+def _narrative_penalty(text: str) -> int:
+
+    lowered = text.lower()
+
+    penalty = 0
+
+    for marker in NARRATIVE_MARKERS:
+
+        occurrences = lowered.count(
+            marker.lower()
+        )
+
+        penalty += min(
+            occurrences * 3,
+            15,
+        )
+
+    return penalty
+
+
+# ============================================================
+# TABLE OF CONTENTS PENALTY
+# ============================================================
+
+def _toc_penalty(
+    candidate: str,
+) -> int:
+
+    lowered = candidate.lower()
+
+    penalty = 0
+
+    # TOCs commonly contain ".... 44" or "44"
+    # immediately following section names.
+
+    if re.search(
+        r"\.{2,}\s*\d{1,3}\b",
+        candidate,
+    ):
+        penalty += 15
+
+    if re.search(
+        r"\btable\s+of\s+contents\b",
+        lowered,
+    ):
+        penalty += 30
+
+    # Very short heading-only candidates are usually TOC
+    # references.
+    if len(candidate.strip()) < 250:
+        penalty += 10
+
+    return penalty
+
+
+# ============================================================
+# TABLE STRUCTURE SCORE
+# ============================================================
+
+def _table_structure_score(
+    text: str,
+    statement_type: str,
+) -> int:
+    """
+    Score evidence that the candidate is an actual financial
+    statement table rather than narrative prose.
+    """
+
+    score = 0
+
+    # --------------------------------------------------------
+    # Multiple years
+    # --------------------------------------------------------
+
+    years = _count_years(text)
+
+    if years >= 3:
+        score += 25
+    elif years == 2:
+        score += 18
+    elif years == 1:
+        score += 5
+
+    # --------------------------------------------------------
+    # Number density
+    # --------------------------------------------------------
+
+    numbers = _count_numbers(text)
+
+    if numbers >= 20:
+        score += 20
+    elif numbers >= 10:
+        score += 12
+    elif numbers >= 5:
+        score += 5
+
+    # --------------------------------------------------------
+    # Statement-specific rows
+    # --------------------------------------------------------
+
+    if statement_type == "income":
+        score += min(
+            _count_keywords(
+                text,
+                INCOME_KEYWORDS,
+            ) * 4,
+            48,
+        )
+
+        # Strong indicators of actual income statement.
+        if re.search(
+            r"\bnet\s+(income|earnings)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 10
+
+        if re.search(
+            r"\b(?:diluted|basic)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 5
+
+    elif statement_type == "balance":
+
+        score += min(
+            _count_keywords(
+                text,
+                BALANCE_KEYWORDS,
+            ) * 4,
+            52,
+        )
+
+        if re.search(
+            r"\btotal\s+assets\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 15
+
+        if re.search(
+            r"\btotal\s+liabilities\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 15
+
+    elif statement_type == "cash_flow":
+
+        score += min(
+            _count_keywords(
+                text,
+                CASH_FLOW_KEYWORDS,
+            ) * 4,
+            52,
+        )
+
+        if re.search(
+            r"\boperating\s+activities\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 10
+
+        if re.search(
+            r"\binvesting\s+activities\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 10
+
+        if re.search(
+            r"\bfinancing\s+activities\b",
+            text,
+            re.IGNORECASE,
+        ):
+            score += 10
+
+    return score
+
+
+# ============================================================
+# CANDIDATE EXTRACTION
+# ============================================================
+
+def _find_candidates(
+    text: str,
+    patterns: List[str],
+    statement_type: str,
+) -> List[Tuple[int, int, str, int]]:
+
+    candidates = []
+
+    for pattern_text in patterns:
+
+        pattern = re.compile(
+            pattern_text,
+            re.IGNORECASE,
+        )
+
+        for match in pattern.finditer(text):
+
+            start = match.start()
+
+            # =================================================
+            # IMPORTANT
+            #
+            # Only the text immediately following the heading
+            # is used for classification.
+            #
+            # This prevents narrative references such as:
+            #
+            # "consolidated statements of earnings were
+            # immaterial..."
+            #
+            # from being mistaken for the actual statement.
+            # =================================================
+
+            immediate_end = min(
+                len(text),
+                start + 1600,
+            )
+
+            immediate = text[
+                start:immediate_end
+            ]
+
+            lowered = immediate.lower()
+
+            score = 0
+
+            # =================================================
+            # 1. YEARS MUST APPEAR CLOSE TO THE HEADING
+            # =================================================
+
+            first_900 = immediate[:900]
+
+            years = set(
+                YEAR_PATTERN.findall(
+                    first_900
+                )
+            )
+
+            if len(years) >= 3:
+                score += 35
+
+            elif len(years) == 2:
+                score += 25
+
+            elif len(years) == 1:
+                score += 5
+
+            else:
+                score -= 30
+
+            # =================================================
+            # 2. FINANCIAL ROWS MUST APPEAR CLOSE TO HEADING
+            # =================================================
+
+            if statement_type == "income":
+
+                row_groups = [
+                    [
+                        "revenue",
+                        "net revenue",
+                        "net sales",
+                        "sales to customers",
+                    ],
+                    [
+                        "cost of sales",
+                        "cost of products sold",
+                        "cost of revenues",
+                        "cost of revenue",
+                    ],
+                    [
+                        "gross profit",
+                    ],
+                    [
+                        "operating income",
+                        "operating profit",
+                        "income from operations",
+                    ],
+                    [
+                        "income before income taxes",
+                        "income before taxes",
+                        "earnings before taxes",
+                    ],
+                    [
+                        "net income",
+                        "net earnings",
+                    ],
+                    [
+                        "earnings per share",
+                        "earnings per common share",
+                    ],
+                ]
+
+            elif statement_type == "balance":
+
+                row_groups = [
+                    [
+                        "current assets",
+                        "total current assets",
+                    ],
+                    [
+                        "total assets",
+                    ],
+                    [
+                        "current liabilities",
+                        "total current liabilities",
+                    ],
+                    [
+                        "total liabilities",
+                    ],
+                    [
+                        "shareholders' equity",
+                        "stockholders' equity",
+                        "shareholders equity",
+                        "stockholders equity",
+                    ],
+                    [
+                        "total equity",
+                        "total liabilities and equity",
+                    ],
+                ]
+
+            else:
+
+                row_groups = [
+                    [
+                        "cash flows from operating activities",
+                        "cash flow from operating activities",
+                        "operating activities",
+                    ],
+                    [
+                        "net cash provided by operating activities",
+                        "net cash flows from operating activities",
+                        "net cash provided by operations",
+                    ],
+                    [
+                        "investing activities",
+                    ],
+                    [
+                        "financing activities",
+                    ],
+                    [
+                        "depreciation and amortization",
+                    ],
+                    [
+                        "capital expenditures",
+                        "capital spending",
+                    ],
+                ]
+
+            # Count groups rather than individual words.
+            # This prevents repeated mentions of one term from
+            # producing a false positive.
+
+            matched_groups = 0
+
+            for group in row_groups:
+
+                if any(
+                    term.lower() in lowered
+                    for term in group
+                ):
+                    matched_groups += 1
+
+            # Strong evidence of an actual table.
+            score += matched_groups * 15
+
+            # =================================================
+            # 3. REQUIRE MULTIPLE ROWS
+            # =================================================
+
+            if matched_groups >= 5:
+                score += 35
+
+            elif matched_groups >= 4:
+                score += 25
+
+            elif matched_groups >= 3:
+                score += 12
+
+            elif matched_groups <= 1:
+                score -= 35
+
+            # =================================================
+            # 4. NUMERICAL DENSITY
+            # =================================================
+
+            number_count = _count_numbers(
+                first_900
+            )
+
+            if number_count >= 20:
+                score += 30
+
+            elif number_count >= 12:
+                score += 20
+
+            elif number_count >= 8:
+                score += 10
+
+            elif number_count < 5:
+                score -= 25
+
+            # =================================================
+            # 5. TABLE-LIKE YEAR + NUMBER COMBINATION
+            # =================================================
+
+            if (
+                len(years) >= 2
+                and number_count >= 10
+                and matched_groups >= 3
+            ):
+                score += 30
+
+            # =================================================
+            # 6. NARRATIVE PENALTY
+            # =================================================
+
+            narrative_words = [
+                "were immaterial",
+                "was immaterial",
+                "the company",
+                "the results of",
+                "as a result",
+                "management",
+                "discussion",
+                "liquidity",
+                "separation costs",
+                "reported as",
+                "reflected as",
+                "described above",
+                "described below",
+                "we believe",
+                "we expect",
+                "our business",
+            ]
+
+            narrative_hits = sum(
+                1
+                for word in narrative_words
+                if word in lowered[:900]
+            )
+
+            score -= narrative_hits * 12
+
+            # =================================================
+            # 7. TABLE OF CONTENTS PENALTY
+            # =================================================
+
+            toc_text = immediate[:500]
+
+            if re.search(
+                r"\.{2,}\s*\d{1,3}\b",
+                toc_text,
+            ):
+                score -= 50
+
+            # Typical TOC pattern:
+            #
+            # statements of earnings 44
+            # statements of cash flows 47
+            #
+
+            if re.search(
+                r"""
+                (?:statements?|sheets?)
+                \s+of\s+
+                [a-z\s]+
+                \s+\d{1,3}
+                """,
+                toc_text,
+                re.IGNORECASE | re.VERBOSE,
+            ):
+                score -= 45
+
+            # =================================================
+            # 8. A REAL TABLE USUALLY HAS A FINANCIAL UNIT
+            # =================================================
+
+            unit_patterns = [
+                "dollars in millions",
+                "dollars and shares in millions",
+                "in millions",
+                "in thousands",
+                "except per share",
+                "except per share amounts",
+            ]
+
+            unit_found = any(
+                unit in lowered[:1000]
+                for unit in unit_patterns
+            )
+
+            if unit_found:
+                score += 15
+
+            # =================================================
+            # 9. REQUIRE A STRONG TABLE SIGNAL
+            # =================================================
+
+            strong_table_signal = (
+                len(years) >= 2
+                and matched_groups >= 3
+                and number_count >= 8
+            )
+
+            if strong_table_signal:
+                score += 25
+            else:
+                score -= 20
+
+            # =================================================
+            # 10. STORE LARGER REGION ONLY AFTER SCORING
+            # =================================================
+
+            region_end = min(
+                len(text),
+                start + 9000,
+            )
+
+            candidates.append(
+                (
+                    start,
+                    region_end,
+                    text[start:region_end],
+                    score,
+                )
+            )
+
+    return candidates
+
+# ============================================================
+# DEDUPLICATE CANDIDATES
+# ============================================================
+
+def _deduplicate_candidates(
+    candidates: List[Tuple[int, int, str, int]],
+) -> List[Tuple[int, int, str, int]]:
+
+    if not candidates:
+        return []
+
+    candidates = sorted(
+        candidates,
+        key=lambda x: x[0],
+    )
+
+    result = []
+
+    for candidate in candidates:
+
+        start = candidate[0]
+
+        duplicate = False
+
+        for existing in result:
+
+            existing_start = existing[0]
+
+            if abs(
+                start - existing_start
+            ) < 100:
+
+                duplicate = True
+                break
+
+        if not duplicate:
+            result.append(
+                candidate
+            )
+
+    return result
+
+
+# ============================================================
+# SELECT BEST CANDIDATE
+# ============================================================
+
+def _select_best_candidate(
+    text: str,
+    patterns: List[str],
+    statement_type: str,
+) -> Optional[Tuple[int, int, str, int]]:
+
+    candidates = _find_candidates(
+        text,
+        patterns,
+        statement_type,
+    )
+
+    candidates = _deduplicate_candidates(
+        candidates
+    )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: x[3],
+        reverse=True,
+    )
+
+    return candidates[0]
+
+
+# ============================================================
+# FIND END OF FINANCIAL TABLE
+# ============================================================
+
+END_MARKERS = [
+    r"see\s+accompanying\s+notes",
+    r"see\s+notes\s+to\s+the\s+consolidated",
+    r"the\s+accompanying\s+notes",
+    r"notes\s+to\s+the\s+financial\s+statements",
+    r"notes\s+to\s+consolidated\s+financial\s+statements",
+]
+
+
+def _find_statement_end(
+    text: str,
+    max_length: int = 9000,
+) -> int:
+    """
+    Find a sensible end for the selected financial statement.
+
+    The first strong note/reference marker is preferred.
+    """
+
+    search_text = text[
+        :max_length
+    ]
+
+    positions = []
+
+    for marker in END_MARKERS:
+
+        match = re.search(
+            marker,
+            search_text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            positions.append(
+                match.start()
+            )
+
+    if positions:
+
+        return min(
+            positions
+        )
+
+    # Fallback.
+    return min(
+        len(text),
+        max_length,
+    )
+
+
+# ============================================================
+# TRIM STATEMENT
+# ============================================================
+
+def _trim_statement(
+    text: str,
+) -> str:
+
+    text = text.strip()
+
+    end = _find_statement_end(
+        text
+    )
+
+    trimmed = text[
+        :end
+    ].strip()
+
+    # Avoid returning microscopic sections.
+    if len(trimmed) < 200:
+
+        return text[
+            :min(
+                len(text),
+                5000,
+            )
+        ].strip()
+
+    return trimmed
+
+
+# ============================================================
+# FALLBACK BY STRONG ROWS
+# ============================================================
+
+def _fallback_from_rows(
+    text: str,
+    statement_type: str,
+) -> str:
+    """
+    Last-resort fallback.
+
+    This is intentionally generic and does not know company
+    names.
+
+    It searches for a strong financial row and captures a
+    bounded region around it.
+    """
+
+    if statement_type == "income":
+
+        anchors = [
+            r"\bnet\s+revenue\b",
+            r"\bnet\s+sales\b",
+            r"\bsales\s+to\s+customers\b",
+            r"\bnet\s+income\b",
+            r"\bnet\s+earnings\b",
+        ]
+
+    elif statement_type == "balance":
+
+        anchors = [
+            r"\btotal\s+assets\b",
+            r"\btotal\s+liabilities\b",
+            r"\btotal\s+assets\s+and\s+liabilities\b",
+        ]
+
+    else:
+
+        anchors = [
+            r"\bnet\s+cash\s+(?:provided|generated|used)",
+            r"\bcash\s+flows?\s+from\s+operating\s+activities\b",
+        ]
+
+    for anchor in anchors:
+
+        match = re.search(
+            anchor,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+
+            start = max(
+                0,
+                match.start() - 1500,
+            )
+
+            end = min(
+                len(text),
+                match.start() + 5000,
+            )
+
+            candidate = text[
+                start:end
+            ]
+
+            if _count_years(candidate) >= 1:
+
+                return _trim_statement(
+                    candidate
+                )
+
+    return ""
+
+
+# ============================================================
+# MAIN SECTION SELECTOR
+# ============================================================
+
+def _select_statement(
+    text: str,
+    patterns: List[str],
+    statement_type: str,
+) -> str:
+
+    candidate = _select_best_candidate(
+        text,
+        patterns,
+        statement_type,
+    )
+
+    if candidate:
+
+        start = candidate[0]
+
+        # -----------------------------------------------
+        # Start at the heading.
+        # -----------------------------------------------
+
+        region = text[
+            start:
+        ]
+
+        # -----------------------------------------------
+        # Limit the region.
+        # -----------------------------------------------
+
+        region = region[
+            :9000
+        ]
+
+        trimmed = _trim_statement(
+            region
+        )
+
+        # -----------------------------------------------
+        # Verify that the selected region actually has
+        # reasonable financial evidence.
+        # -----------------------------------------------
+
+        if (
+            _count_years(trimmed) >= 1
+            and _count_numbers(trimmed) >= 5
+        ):
+
+            return trimmed
+
+    # ----------------------------------------------------
+    # Fallback
+    # ----------------------------------------------------
+
+    return _fallback_from_rows(
+        text,
+        statement_type,
+    )
+
+
+# ============================================================
+# PUBLIC FUNCTION
+# ============================================================
+
+def extract_financial_sections(
+    document_text: str,
+) -> Dict[str, str]:
+    """
+    Extract the three primary financial statements from an
+    arbitrary annual report.
+
+    Returns:
+
+        {
+            "income_statement": "...",
+            "balance_sheet": "...",
+            "cash_flow": "..."
+        }
+
+    The function is company-independent.
+    """
+
+    if not document_text:
+
+        return {
+            "income_statement": "",
+            "balance_sheet": "",
+            "cash_flow": "",
+        }
+
+    text = _normalize_text(
+        document_text
+    )
+
+    income = _select_statement(
+        text,
+        INCOME_HEADINGS,
+        "income",
+    )
+
+    balance = _select_statement(
+        text,
+        BALANCE_HEADINGS,
+        "balance",
+    )
+
+    cash_flow = _select_statement(
+        text,
+        CASH_FLOW_HEADINGS,
+        "cash_flow",
+    )
+
+    return {
+        "income_statement": income,
+        "balance_sheet": balance,
+        "cash_flow": cash_flow,
+    }
+
+
+# ============================================================
+# DEBUGGING HELPER
+# ============================================================
+
+def debug_financial_sections(
+    document_text: str,
+) -> Dict[str, Dict[str, object]]:
+    """
+    Optional debugging helper.
+
+    Useful for understanding which candidate was selected.
+
+    This does not affect normal extraction.
+    """
+
+    if not document_text:
+
+        return {}
+
+    text = _normalize_text(
+        document_text
+    )
+
+    output = {}
+
+    configs = {
+        "income_statement": (
+            INCOME_HEADINGS,
+            "income",
+        ),
+        "balance_sheet": (
+            BALANCE_HEADINGS,
+            "balance",
+        ),
+        "cash_flow": (
+            CASH_FLOW_HEADINGS,
+            "cash_flow",
+        ),
+    }
+
+    for name, (
+        patterns,
+        statement_type,
+    ) in configs.items():
+
+        candidates = _deduplicate_candidates(
+            _find_candidates(
+                text,
+                patterns,
+                statement_type,
+            )
+        )
+
+        candidates.sort(
+            key=lambda x: x[3],
+            reverse=True,
+        )
+
+        output[name] = {
+            "candidate_count": len(
+                candidates
+            ),
+            "top_candidates": [
+                {
+                    "position": c[0],
+                    "score": c[3],
+                    "preview": c[2][:500],
+                }
+                for c in candidates[:5]
+            ],
+        }
+
+    return output
+def build_extraction_context(
+    document_text: str,
+) -> str:
+    """
+    Build a compact context containing only the selected
+    financial statements.
+
+    Ollama should NOT receive the entire annual report.
+    """
+
+    sections = extract_financial_sections(
+        document_text
+    )
+
+    parts = []
+
+    if sections.get("income_statement"):
+        parts.append(
+            "===== INCOME_STATEMENT =====\n"
+            + sections["income_statement"]
+        )
+
+    if sections.get("balance_sheet"):
+        parts.append(
+            "===== BALANCE_SHEET =====\n"
+            + sections["balance_sheet"]
+        )
+
+    if sections.get("cash_flow"):
+        parts.append(
+            "===== CASH_FLOW =====\n"
+            + sections["cash_flow"]
+        )
+
+    return "\n\n".join(parts)
+# agents/extraction_agent/ollama_extraction.py
+"""
+Generic hybrid financial extraction.
+
+Ollama may classify row labels, but it is NEVER trusted to invent
+or return financial numbers. Python extracts numbers from actual
+financial rows.
+"""
+
+import json
+import re
+from typing import Any, Dict, Optional
+
+import ollama
+
+
+MODEL = "llama3.2:latest"
+
+
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+
+    text = text.strip()
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    try:
+        result = json.loads(text)
+        return result if isinstance(result, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group(0))
+            return result if isinstance(result, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+NUMBER_PATTERN = re.compile(
+    r"""
+    \(?\s*
+    -?
+    (?:
+        \d{1,3}(?:,\d{3})+
+        |
+        \d+
+    )
+    (?:\.\d+)?
+    \s*
+    \)?
+    """,
+    re.VERBOSE,
+)
+
+
+def _parse_number(raw: str) -> Optional[float]:
+    if not raw:
+        return None
+
+    value = raw.strip()
+    negative = value.startswith("(") or value.startswith("-")
+
+    value = (
+        value.replace(",", "")
+        .replace("(", "")
+        .replace(")", "")
+        .strip()
+    )
+
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+
+    # Never interpret a year as a metric.
+    if 1900 <= number <= 2100:
+        return None
+
+    return -number if negative else number
+
+
+def _normalize(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\u200b", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+# Generic semantic families only.
+REVENUE_TERMS = [
+    "total revenues",
+    "total revenue",
+    "net revenues",
+    "net revenue",
+    "net sales",
+    "total sales",
+    "revenue",
+    "revenues",
+    "sales",
+    "net sales and revenues",
+    "total net sales",
+    "sales to customers",
+]
+
+NET_PROFIT_TERMS = [
+    "net income attributable to common stockholders",
+    "net income attributable to shareholders",
+    "net income attributable to owners",
+    "net income attributable",
+    "net income",
+    "net earnings",
+    "profit for the year",
+    "profit for the period",
+]
+
+ASSET_TERMS = ["total assets"]
+
+LIABILITY_TERMS = ["total liabilities"]
+
+CASH_FLOW_TERMS = [
+    "net cash provided by operating activities",
+    "net cash provided by operations",
+    "net cash from operating activities",
+    "net cash generated from operating activities",
+    "net cash generated by operating activities",
+    "cash provided by operating activities",
+    "cash generated from operating activities",
+]
+
+EPS_TERMS = [
+    "earnings per common share, diluted",
+    "diluted earnings per share",
+    "diluted net income per share",
+    "net earnings per share",
+    "net income per share",
+    "earnings per share",
+]
+
+
+def _values_immediately_after(
+    text: str,
+    position: int,
+    max_chars: int = 100,
+) -> list[float]:
+    """
+    Extract consecutive financial values immediately following
+    a financial statement row label.
+
+    Designed for rows such as:
+
+        Total assets 624,894 818,042
+
+        Net income 30,425 59,248 77,670
+
+    The parser stops when it encounters substantial prose.
+    """
+
+    candidate = text[
+        position:position + max_chars
+    ]
+
+    candidate = candidate.lstrip(
+        " \t|-â€“â€”"
+    )
+
+    # Remove an optional currency symbol.
+    candidate = re.sub(
+        r"^(?:\$|â‚¹|Rs\.?)\s*",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+
+    values = []
+
+    cursor = 0
+
+    while cursor < len(candidate):
+
+        # Skip ordinary whitespace.
+        while (
+            cursor < len(candidate)
+            and candidate[cursor].isspace()
+        ):
+            cursor += 1
+
+        # Optional currency symbol before each value.
+        currency = re.match(
+            r"(?:\$|â‚¹|Rs\.?)\s*",
+            candidate[cursor:],
+            re.IGNORECASE,
+        )
+
+        if currency:
+            cursor += currency.end()
+
+        match = re.match(
+            r"\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)"
+            r"(?:\.\d+)?\)?",
+            candidate[cursor:],
+        )
+
+        if not match:
+            break
+
+        value = _parse_number(
+            match.group(0)
+        )
+
+        if value is None:
+            break
+
+        values.append(value)
+
+        cursor += match.end()
+
+        if len(values) >= 3:
+            break
+
+        # Look ahead at the text between this value and
+        # the next possible value.
+        remaining = candidate[cursor:]
+
+        next_number = re.search(
+            r"\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)"
+            r"(?:\.\d+)?\)?",
+            remaining,
+        )
+
+        if not next_number:
+            break
+
+        separator = remaining[
+            :next_number.start()
+        ]
+
+        # If substantial alphabetic prose appears before
+        # the next number, this is no longer the same row.
+        letters = re.sub(
+            r"[\s:;,\-â€“â€”|$â‚¹.]",
+            "",
+            separator,
+        )
+
+        if len(letters) > 3:
+            break
+
+        cursor += next_number.start()
+
+    return values
+
+
+def _find_row_values(
+    section: str,
+    terms: list[str],
+    max_chars: int = 100,
+) -> Optional[list[float]]:
+    section = _normalize(section)
+    candidates = []
+
+    for term in terms:
+        pattern = re.compile(
+            re.escape(term).replace(r"\ ", r"\s*"),
+            re.IGNORECASE,
+        )
+
+        for match in pattern.finditer(section):
+            values = _values_immediately_after(
+                section,
+                match.end(),
+                max_chars,
+            )
+
+            if not values:
+                continue
+
+            # Prefer more specific labels and earlier table rows.
+            specificity = len(term.split())
+            score = specificity * 10
+
+            candidates.append(
+                (score, match.start(), values)
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (item[0], -item[1]),
+        reverse=True,
+    )
+
+    return candidates[0][2]
+
+
+# ---------------------------------------------------------
+# Latest fiscal-year value selection
+# ---------------------------------------------------------
+
+def _latest_value(
+    section: str,
+    values: list[float],
+) -> Optional[float]:
+    """
+    Return the value belonging to the latest fiscal year.
+
+    Financial statements are NOT guaranteed to list years
+    in descending order.
+
+    Examples:
+
+        2025 2024 2023
+        100  90   80
+        -> 100
+
+        2023 2024 2025
+        80   90   100
+        -> 100
+
+        2024 2025
+        90   100
+        -> 100
+
+    The function detects the year order from the beginning
+    of the financial statement instead of assuming a fixed
+    column order.
+    """
+
+    if not values:
+        return None
+
+    if len(values) == 1:
+        return values[0]
+
+    if not section:
+        return values[0]
+
+    section = _normalize(section)
+
+    # Financial statement column headers are normally
+    # located near the beginning of the selected section.
+    header = section[:800]
+
+    years = []
+
+    for match in re.finditer(r"\b(20\d{2})\b", header):
+        year = int(match.group(1))
+
+        if year not in years:
+            years.append(year)
+
+        if len(years) >= len(values):
+            break
+
+    # If the year count does not match the extracted values,
+    # fall back safely instead of guessing.
+    if len(years) != len(values):
+        return values[0]
+
+    latest_year = max(years)
+    latest_index = years.index(latest_year)
+
+    if latest_index >= len(values):
+        return values[0]
+
+    return values[latest_index]
+def _extract_revenue(income: str) -> Optional[float]:
+    values = _find_row_values(income, REVENUE_TERMS)
+
+    if not values:
+        return None
+
+    return _latest_value(income, values)
+
+
+def _extract_net_profit(
+    income: str,
+) -> Optional[float]:
+    """
+    Extract consolidated net income / net earnings
+    for the latest fiscal year.
+
+    Supports generic annual-report terminology such as:
+
+        Net income
+        Net earnings
+        Net income including noncontrolling interests
+        Net earnings including noncontrolling interests
+
+    The latest fiscal-year column is selected automatically.
+    """
+
+    if not income:
+        return None
+
+    income = _normalize(income)
+
+    labels = [
+        "net income including noncontrolling interests",
+        "net earnings including noncontrolling interests",
+        "net income",
+        "net earnings",
+    ]
+
+    candidates = []
+
+    for label in labels:
+
+        pattern = re.compile(
+            re.escape(label).replace(
+                r"\ ",
+                r"\s+",
+            ),
+            re.IGNORECASE,
+        )
+
+        for match in pattern.finditer(income):
+
+            values = _values_immediately_after(
+                income,
+                match.end(),
+                max_chars=120,
+            )
+
+            if values:
+                candidates.append(
+                    (
+                        len(label.split()),
+                        match.start(),
+                        values,
+                    )
+                )
+
+    if not candidates:
+        return None
+
+    # Prefer the most specific label.
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            -item[1],
+        ),
+        reverse=True,
+    )
+
+    values = candidates[0][2]
+
+    return _latest_value(
+        income,
+        values,
+    )
+
+
+def _extract_assets(balance: str) -> Optional[float]:
+    values = _find_row_values(balance, ASSET_TERMS)
+
+    if not values:
+        return None
+
+    return _latest_value(balance, values)
+
+
+def _extract_liabilities(
+    balance: str,
+) -> Optional[float]:
+    """
+    Extract total liabilities from a balance sheet.
+
+    Generic strategies:
+
+    1. Direct:
+       Total liabilities 123,456 120,000
+
+    2. Total liabilities and equity:
+       Total liabilities and stockholders' equity
+       818,042 624,894
+
+       Total stockholders' equity
+       411,065 285,970
+
+       Liabilities = Total liabilities and equity
+                     - Total stockholders' equity
+
+    3. Extended balance-sheet presentation:
+       Total liabilities, redeemable noncontrolling interest,
+       and shareholders' equity
+       260,823 252,399
+
+       Total shareholders' equity
+       97,421 90,349
+
+       Redeemable noncontrolling interest
+       271 222
+
+       Liabilities =
+           Total assets
+           - Total shareholders' equity
+           - Redeemable noncontrolling interest
+
+    The latest fiscal-year column is selected automatically.
+    """
+
+    if not balance:
+        return None
+
+    balance = _normalize(balance)
+
+    # ---------------------------------------------------------
+    # Strategy 1: Exact direct "Total liabilities" row.
+    #
+    # IMPORTANT:
+    # Do not treat:
+    #
+    #   Total liabilities, redeemable noncontrolling interest,
+    #   and shareholders' equity
+    #
+    # as a direct liabilities row.
+    # ---------------------------------------------------------
+
+    direct_pattern = re.compile(
+        r"""
+        \btotal\s+liabilities\b
+        (?!\s*(?:,|and)\s*
+            (?:
+                redeemable\s+noncontrolling\s+interest(?:s)?
+                |
+                stockholders['â€™]?\s+equity
+                |
+                shareholders['â€™]?\s+equity
+                |
+                equity
+            )
+        )
+        """,
+        re.IGNORECASE | re.VERBOSE,
+    )
+
+    direct_candidates = []
+
+    for match in direct_pattern.finditer(balance):
+
+        values = _values_immediately_after(
+            balance,
+            match.end(),
+            max_chars=100,
+        )
+
+        if values:
+            direct_candidates.append(
+                (
+                    match.start(),
+                    values,
+                )
+            )
+
+    if direct_candidates:
+
+        # Prefer the first valid direct balance-sheet row.
+        direct_candidates.sort(
+            key=lambda item: item[0]
+        )
+
+        return _latest_value(
+            balance,
+            direct_candidates[0][1],
+        )
+
+    # ---------------------------------------------------------
+    # Strategy 2:
+    #
+    # Total liabilities and stockholders'/shareholders' equity
+    # minus
+    # Total stockholders'/shareholders' equity
+    # ---------------------------------------------------------
+
+    total_equity_values = _find_row_values(
+        balance,
+        [
+            "total stockholders' equity",
+            "total stockholders equity",
+            "total shareholders' equity",
+            "total shareholders equity",
+            "total equity",
+        ],
+    )
+
+    total_liabilities_equity_values = _find_row_values(
+        balance,
+        [
+            "total liabilities and stockholders' equity",
+            "total liabilities and stockholders equity",
+            "total liabilities and shareholders' equity",
+            "total liabilities and shareholders equity",
+            "total liabilities and equity",
+        ],
+    )
+
+    if (
+        total_equity_values
+        and total_liabilities_equity_values
+    ):
+        total_equity = _latest_value(
+            balance,
+            total_equity_values,
+        )
+
+        total_liabilities_equity = _latest_value(
+            balance,
+            total_liabilities_equity_values,
+        )
+
+        if (
+            total_equity is not None
+            and total_liabilities_equity is not None
+        ):
+            return (
+                total_liabilities_equity
+                - total_equity
+            )
+
+    # ---------------------------------------------------------
+    # Strategy 3:
+    #
+    # Extended balance sheet:
+    #
+    # Total assets
+    # - Total shareholders' equity
+    # - Redeemable noncontrolling interest
+    #
+    # This handles statements such as:
+    #
+    # Total liabilities, redeemable noncontrolling interest,
+    # and shareholders' equity
+    #
+    # where the report does not provide a standalone
+    # "Total liabilities" row.
+    # ---------------------------------------------------------
+
+    total_assets_values = _find_row_values(
+        balance,
+        [
+            "total assets",
+        ],
+    )
+
+    redeemable_nci_values = _find_row_values(
+        balance,
+        [
+            "redeemable noncontrolling interest",
+            "redeemable noncontrolling interests",
+        ],
+    )
+
+    if (
+        total_assets_values
+        and total_equity_values
+    ):
+        total_assets = _latest_value(
+            balance,
+            total_assets_values,
+        )
+
+        total_equity = _latest_value(
+            balance,
+            total_equity_values,
+        )
+
+        if (
+            total_assets is not None
+            and total_equity is not None
+        ):
+
+            redeemable_nci = 0.0
+
+            if redeemable_nci_values:
+                latest_nci = _latest_value(
+                    balance,
+                    redeemable_nci_values,
+                )
+
+                if latest_nci is not None:
+                    redeemable_nci = latest_nci
+
+            liabilities = (
+                total_assets
+                - total_equity
+                - redeemable_nci
+            )
+
+            return liabilities
+
+    return None
+
+
+def _extract_cash_flow(
+    cash_flow: str,
+) -> Optional[float]:
+    """
+    Extract net operating cash flow for the latest fiscal year.
+
+    Supports generic financial-report variations such as:
+
+        Net cash provided by operating activities
+        Net cash provided by (used in) operating activities
+        Net cash flows from operating activities
+        Net cash generated by operating activities
+        Net cash provided by operations
+        Net cash provided by (used in) operations
+    """
+
+    if not cash_flow:
+        return None
+
+    cash_flow = _normalize(cash_flow)
+
+    labels = [
+        r"""
+        net\s+cash\s+
+        (?:
+            provided\s+by
+            |
+            generated\s+by
+            |
+            generated\s+from
+            |
+            flows?\s+from
+        )
+        \s*
+        (?:\(\s*used\s+in\s*\))?
+        \s+
+        operating\s+activities
+        """,
+
+        r"""
+        net\s+cash\s+
+        (?:
+            provided\s+by
+            |
+            generated\s+by
+            |
+            generated\s+from
+            |
+            flows?\s+from
+        )
+        \s*
+        (?:\(\s*used\s+in\s*\))?
+        \s+
+        operations
+        """,
+
+        r"""
+        cash\s+
+        (?:
+            provided\s+by
+            |
+            generated\s+by
+            |
+            generated\s+from
+            |
+            flows?\s+from
+        )
+        \s*
+        (?:\(\s*used\s+in\s*\))?
+        \s+
+        operating\s+activities
+        """,
+    ]
+
+    candidates = []
+
+    for label in labels:
+
+        pattern = re.compile(
+            label,
+            re.IGNORECASE | re.VERBOSE,
+        )
+
+        for match in pattern.finditer(cash_flow):
+
+            values = _values_immediately_after(
+                cash_flow,
+                match.end(),
+                max_chars=120,
+            )
+
+            if not values:
+                continue
+
+            candidates.append(
+                (
+                    len(
+                        re.findall(
+                            r"\w+",
+                            label,
+                        )
+                    ),
+                    match.start(),
+                    values,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            -item[1],
+        ),
+        reverse=True,
+    )
+
+    return _latest_value(
+        cash_flow,
+        candidates[0][2],
+    )
+
+def _extract_eps(
+    income: str,
+) -> Optional[float]:
+    """
+    Extract diluted EPS for the latest fiscal year.
+
+    Generic support for variations including:
+
+        Earnings per share, diluted
+
+        Earnings per common share, diluted
+
+        Net earnings per share - diluted
+
+        Net income per share of common stock ... diluted
+
+        Net income attributable to ... per common share ...
+        diluted
+
+        Diluted net income per common share attributable to ...
+
+        Continuing operations - diluted
+
+        Total net earnings per share - diluted
+    """
+
+    if not income:
+        return None
+
+    income = _normalize(income)
+
+    patterns = [
+
+        # -----------------------------------------------------
+        # 1. Standard:
+        #
+        # Earnings per share ... diluted
+        # Earnings per common share ... diluted
+        # -----------------------------------------------------
+
+        r"""
+        earnings\s+
+        per\s+
+        (?:common\s+)?
+        share
+        .*?
+        diluted
+        """,
+
+        # -----------------------------------------------------
+        # 2. Net income / net earnings:
+        #
+        # Net income per share ... diluted
+        # Net earnings per share ... diluted
+        # -----------------------------------------------------
+
+        r"""
+        net\s+
+        (?:income|earnings)
+        .*?
+        per\s+
+        (?:common\s+)?
+        share
+        .*?
+        diluted
+        """,
+
+        # -----------------------------------------------------
+        # 3. Existing common-stock form:
+        #
+        # Net income per share of common stock attributable
+        # to common stockholders ... Diluted
+        # -----------------------------------------------------
+
+        r"""
+        net\s+
+        income\s+
+        per\s+
+        share
+        .*?
+        common\s+
+        stock
+        .*?
+        diluted
+        """,
+
+        # -----------------------------------------------------
+        # 4. NEW generic form:
+        #
+        # Diluted net income per common share attributable
+        # to Walmart
+        #
+        # Also works for:
+        #
+        # Diluted net income per common share
+        # Diluted net earnings per common share
+        # -----------------------------------------------------
+
+       r"""
+diluted
+\s+
+net
+\s+
+(?:income|earnings)
+\s+
+per
+\s+
+(?:common\s+)?
+share
+(?:\s+
+    attributable
+    \s+
+    to
+    .*?
+)?
+(?=
+    \s*
+    (?:\$|â‚¹|Rs\.?)?
+    \s*
+    \(?
+    -?
+    \d
+)
+""",
+        # -----------------------------------------------------
+        # 5. Continuing operations - diluted
+        # -----------------------------------------------------
+
+        r"""
+        continuing\s+
+        operations
+        \s*[-â€“â€”:]
+        \s*
+        diluted
+        """,
+
+        # -----------------------------------------------------
+        # 6. Generic diluted earnings per share
+        # -----------------------------------------------------
+
+        r"""
+        diluted
+        \s+
+        earnings
+        \s+
+        per
+        \s+
+        share
+        """,
+    ]
+
+    candidates = []
+
+    for pattern_text in patterns:
+
+        pattern = re.compile(
+            pattern_text,
+            re.IGNORECASE | re.VERBOSE,
+        )
+
+        for match in pattern.finditer(income):
+
+            values = _values_immediately_after(
+                income,
+                match.end(),
+                max_chars=150,
+            )
+
+            if not values:
+                continue
+
+            # EPS values are normally small decimal numbers.
+            # Reject obvious share counts such as:
+            #
+            # 3,528
+            # 10,827
+            #
+            eps_values = [
+                value
+                for value in values
+                if -100.0 < value < 100.0
+            ]
+
+            if not eps_values:
+                continue
+
+            candidates.append(
+                (
+                    len(
+                        re.findall(
+                            r"\w+",
+                            pattern_text,
+                        )
+                    ),
+                    match.start(),
+                    eps_values,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            -item[1],
+        ),
+        reverse=True,
+    )
+
+    return _latest_value(
+        income,
+        candidates[0][2],
+    )
+
+
+def extract_numbers_from_sections(
+    sections: Dict[str, str],
+) -> Dict[str, Any]:
+    """
+    Deterministic extraction from the selected financial statements only.
+    """
+
+    income = sections.get("income_statement", "")
+    balance = sections.get("balance_sheet", "")
+    cash_flow = sections.get("cash_flow", "")
+
+    return {
+        "revenue": _extract_revenue(income),
+        "net_profit": _extract_net_profit(income),
+        "assets": _extract_assets(balance),
+        "liabilities": _extract_liabilities(balance),
+        "cash_flow": _extract_cash_flow(cash_flow),
+        "eps": _extract_eps(income),
+    }
+
+
+def extract_first_financial_number(
+    row: Optional[str],
+) -> Optional[float]:
+    if not row:
+        return None
+
+    for match in NUMBER_PATTERN.finditer(row):
+        value = _parse_number(match.group(0))
+        if value is not None:
+            return value
+
+    return None
+
+
+def extract_numbers_from_rows(
+    rows: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "revenue": extract_first_financial_number(
+            rows.get("revenue_row")
+        ),
+        "net_profit": extract_first_financial_number(
+            rows.get("net_profit_row")
+        ),
+        "assets": extract_first_financial_number(
+            rows.get("total_assets_row")
+        ),
+        "liabilities": extract_first_financial_number(
+            rows.get("total_liabilities_row")
+        ),
+        "cash_flow": extract_first_financial_number(
+            rows.get("operating_cash_flow_row")
+        ),
+        "eps": extract_first_financial_number(
+            rows.get("eps_row")
+        ),
+    }
+
+
+def identify_financial_rows(
+    document_text: str,
+) -> Dict[str, Any]:
+    """
+    Ollama is used only for semantic row-label classification.
+    It is not trusted for numeric extraction.
+    """
+
+    if not document_text:
+        raise ValueError("Financial statement context is empty.")
+
+    prompt = f"""
+You are a financial-statement row classifier.
+
+Identify the actual row label for each requested metric from the
+financial statements below.
+
+Return ONLY JSON:
+{{
+  "revenue_label": null,
+  "net_profit_label": null,
+  "total_assets_label": null,
+  "total_liabilities_label": null,
+  "operating_cash_flow_label": null,
+  "eps_label": null
+}}
+
+Rules:
+- Use only labels that actually occur in the supplied statements.
+- Do not invent company names or labels.
+- Revenue may be revenue, net revenue, net sales, sales, total revenue, etc.
+- Profit may be net income, net earnings, profit for the period/year, etc.
+- Assets = total assets.
+- Liabilities = total liabilities.
+- Operating cash flow = the row giving net cash from/provided by/generated
+  from operating activities.
+- EPS = diluted earnings/net-income/net-earnings per share where available.
+- Return labels only. Never return numbers.
+- Return JSON only.
+
+FINANCIAL STATEMENTS:
+{document_text}
+"""
+
+    response = ollama.chat(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": "Return JSON only. Never explain.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        format="json",
+        options={
+            "temperature": 0,
+            "num_predict": 500,
+        },
+    )
+
+    result = _extract_json(
+        response["message"]["content"]
+    )
+
+    if result is None:
+        raise ValueError("Ollama did not return valid JSON.")
+
+    return {
+        "revenue_label": result.get("revenue_label"),
+        "net_profit_label": result.get("net_profit_label"),
+        "total_assets_label": result.get("total_assets_label"),
+        "total_liabilities_label": result.get("total_liabilities_label"),
+        "operating_cash_flow_label": result.get("operating_cash_flow_label"),
+        "eps_label": result.get("eps_label"),
+    }
+
+
+def extract_with_ollama(
+    document_text: str,
+) -> Dict[str, Any]:
+    """
+    Complete generic pipeline:
+      1. locate financial statements
+      2. optionally classify row labels with Ollama
+      3. deterministically extract numbers
+      4. return metrics
+
+    Numeric values NEVER come from Ollama.
+    """
+
+    from agents.extraction_agent.financial_section_selector import (
+        build_extraction_context,
+        extract_financial_sections,
+    )
+
+    if not document_text:
+        raise ValueError("Document text is empty.")
+
+    sections = extract_financial_sections(
+        document_text
+    )
+
+    if not any(sections.values()):
+        raise ValueError(
+            "No financial statement sections were found."
+        )
+
+    context = build_extraction_context(
+        document_text
+    )
+
+    # Ollama labels are retained for traceability, but extraction remains
+    # deterministic so model wording cannot produce incorrect numbers.
+    try:
+        labels = identify_financial_rows(context)
+    except Exception:
+        labels = {
+            "revenue_label": None,
+            "net_profit_label": None,
+            "total_assets_label": None,
+            "total_liabilities_label": None,
+            "operating_cash_flow_label": None,
+            "eps_label": None,
+        }
+
+    rows = {
+        "revenue_row": labels.get("revenue_label"),
+        "net_profit_row": labels.get("net_profit_label"),
+        "total_assets_row": labels.get("total_assets_label"),
+        "total_liabilities_row": labels.get("total_liabilities_label"),
+        "operating_cash_flow_row": labels.get(
+            "operating_cash_flow_label"
+        ),
+        "eps_row": labels.get("eps_label"),
+    }
+
+    metrics = extract_numbers_from_sections(
+        sections
+    )
+
+    return {
+        "model": MODEL,
+        "rows": rows,
+        "metrics": metrics,
+    }
+import re
+from typing import Optional, Dict, Any
+
+
+# ---------------------------------------------------------
+# Numeric helpers
+# ---------------------------------------------------------
+
+NUMBER_RE = re.compile(
+    r"""
+    (?:
+        \$\s*
+        |â‚¹\s*
+        |Rs\.?\s*
+    )?
+    \(?\s*
+    -?
+    (?:\d{1,3}(?:,\d{3})+|\d+)
+    (?:\.\d+)?
+    \s*
+    (?:billion|million|thousand|bn|mn|m)?
+    \s*\)?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def parse_number(value: str) -> Optional[float]:
+    if not value:
+        return None
+
+    value = value.strip()
+
+    negative = value.startswith("(") and value.endswith(")")
+
+    value = re.sub(
+        r"^(?:\$|â‚¹|Rs\.?)\s*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    multiplier = 1
+
+    lower = value.lower()
+
+    if "billion" in lower or re.search(r"\bbn\b", lower):
+        multiplier = 1_000_000_000
+    elif "million" in lower or re.search(r"\bmn\b", lower):
+        multiplier = 1_000_000
+    elif "thousand" in lower:
+        multiplier = 1_000
+
+    value = re.sub(
+        r"\b(?:billion|million|thousand|bn|mn|m)\b",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    value = (
+        value
+        .replace(",", "")
+        .replace("(", "")
+        .replace(")", "")
+        .strip()
+    )
+
+    try:
+        result = float(value) * multiplier
+        return -result if negative else result
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------
+# Extract numeric candidates
+# ---------------------------------------------------------
+
+def numeric_candidates(text: str):
+    results = []
+
+    for match in NUMBER_RE.finditer(text):
+        raw = match.group(0).strip()
+
+        value = parse_number(raw)
+
+        if value is None:
+            continue
+
+        # Ignore years
+        if 1900 <= abs(value) <= 2100:
+            continue
+
+        results.append((match.start(), match.end(), raw, value))
+
+    return results
+
+
+# ---------------------------------------------------------
+# Statement-aware metric extraction
+# ---------------------------------------------------------
+
+def extract_table_value(
+    text: str,
+    labels: list[str],
+    search_distance: int = 1000,
+) -> Optional[float]:
+
+    normalized = re.sub(r"[ \t]+", " ", text)
+
+    candidates = []
+
+    for label in labels:
+
+        for match in re.finditer(
+            rf"\b{label}\b",
+            normalized,
+            re.IGNORECASE,
+        ):
+
+            start = match.end()
+            end = min(
+                len(normalized),
+                start + search_distance,
+            )
+
+            after = normalized[start:end]
+
+            # Stop at obvious narrative boundaries.
+            after = re.split(
+                r"\n\s*\n|(?=\b(?:The |Our |In 20\d{2}|We |This |These ))",
+                after,
+                maxsplit=1,
+            )[0]
+
+            numbers = numeric_candidates(after)
+
+            if not numbers:
+                continue
+
+            # Strong preference for a financial-table pattern:
+            # multiple numbers close together.
+            score = 0
+
+            if len(numbers) >= 2:
+                score += 5
+
+            if len(numbers) >= 3:
+                score += 3
+
+            # Currency markers strongly suggest a financial table.
+            if "$" in after or "â‚¹" in after or "Rs." in after:
+                score += 3
+
+            # Percentage-heavy text is usually a chart,
+            # not the target financial statement.
+            percent_count = after.count("%")
+
+            if percent_count >= 2:
+                score -= 5
+
+            # Narrative phrases are weaker candidates.
+            if re.search(
+                r"\b(?:representing|compared to|decrease of|increase of)\b",
+                after,
+                re.IGNORECASE,
+            ):
+                score -= 4
+
+            candidates.append(
+                (
+                    score,
+                    numbers[0][3],
+                    after[:250],
+                )
+            )
+
+    if not candidates:
+        return None
+
+    # Highest-scoring candidate wins.
+    candidates.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    return candidates[0][1]
+
+
+# ---------------------------------------------------------
+# Company
+# ---------------------------------------------------------
+
+def extract_company(text: str) -> Optional[str]:
+    """
+    Dynamically extract the company name from an annual report.
+
+    This function does not contain company-specific rules.
+    """
+
+    if not text:
+        return None
+
+    text = text[:30000]
+
+    patterns = [
+        # -----------------------------------------------------
+        # SEC registrant format
+        # -----------------------------------------------------
+        r"""
+        (?:Exact\s+name\s+of\s+registrant
+        |Exact\s+name\s+of\s+registrant\s+as\s+specified\s+in\s+its\s+charter)
+        \s*[:\-]?\s*
+        ([A-Z][A-Za-z0-9&.,'â€™\- ]{2,100}?)
+        (?:
+            \s*\(|\s*
+            Commission\s+File\s+Number|
+            \s+I\.R\.S\.|
+            \s+IRS
+        )
+        """,
+
+        # -----------------------------------------------------
+        # Company & Consolidated Subsidiaries
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'â€™\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \s*(?:&|and)\s+
+        (?:Consolidated\s+)?(?:Subsidiaries|Companies)
+        \b
+        """,
+
+        # -----------------------------------------------------
+        # Company and Subsidiaries
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'â€™\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \s+(?:and|&)
+        \s+(?:Consolidated\s+)?Subsidiaries
+        \b
+        """,
+
+        # -----------------------------------------------------
+        # Generic legal company name
+        # -----------------------------------------------------
+        r"""
+        \b(
+            [A-Z][A-Za-z0-9&.,'â€™\- ]{2,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|Company|
+               Co\.?|Ltd\.?|Limited|PLC)
+        )
+        \b
+        """,
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE | re.VERBOSE,
+        )
+
+        if match:
+
+            company = match.group(1).strip()
+
+            company = re.sub(
+                r"\s+",
+                " ",
+                company,
+            )
+
+            company = company.rstrip(
+                " .,;:"
+            )
+
+            return company
+
+    return None
+
+# ---------------------------------------------------------
+# Fiscal year
+# ---------------------------------------------------------
+
+def extract_fiscal_year(text: str) -> Optional[int]:
+
+    patterns = [
+        r"fiscal year ended.*?\b(20\d{2})\b",
+        r"year ended.*?\b(20\d{2})\b",
+        r"\b(20\d{2})\s+Annual Report\b",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+             pattern,
+               text,
+                 re.IGNORECASE | re.DOTALL,
+        )
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+# ---------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------
+
+def extract_revenue(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Total revenues",
+            r"Total revenue",
+            r"Net sales",
+            r"Net revenues",
+            r"Total net sales",
+        ],
+    )
+
+
+def extract_net_profit(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Net income attributable to common stockholders",
+            r"Net income attributable to .*?stockholders",
+            r"Net income attributable to .*?shareholders",
+            r"Net income",
+            r"Net earnings",
+            r"Net profit",
+        ],
+    )
+
+
+def extract_assets(text: str):
+
+    return extract_table_value(
+        text,
+        [r"Total assets"],
+        search_distance=500,
+    )
+
+
+def extract_liabilities(text: str):
+
+    return extract_table_value(
+        text,
+        [r"Total liabilities"],
+        search_distance=500,
+    )
+
+
+def extract_cash_flow(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Net cash provided by operating activities",
+            r"Net cash provided by operations",
+            r"Cash provided by operating activities",
+            r"Operating cash flow",
+        ],
+        search_distance=500,
+    )
+
+
+def extract_eps(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Diluted earnings per share",
+            r"Basic earnings per share",
+            r"Earnings per share",
+            r"Diluted EPS",
+            r"Basic EPS",
+        ],
+        search_distance=500,
+    )
+
+
+def extract_current_ratio(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Current ratio",
+        ],
+        search_distance=100,
+    )
+
+
+def extract_debt_to_equity(text: str):
+
+    return extract_table_value(
+        text,
+        [
+            r"Debt-to-equity ratio",
+            r"Debt to equity ratio",
+            r"Debt/equity ratio",
+        ],
+        search_distance=100,
+    )
+
+
+# ---------------------------------------------------------
+# Main extraction function
+# ---------------------------------------------------------
+
+def extract_financial_data(
+    document_text: str,
+    metric_id: str,
+    document_id: str,
+) -> Dict[str, Any]:
+
+    if not document_text:
+        return {
+            "metric_id": metric_id,
+            "document_id": document_id,
+            "company": None,
+            "fiscal_year": None,
+            "revenue": None,
+            "net_profit": None,
+            "assets": None,
+            "liabilities": None,
+            "cash_flow": None,
+            "eps": None,
+            "ratios": {
+                "current_ratio": None,
+                "debt_to_equity": None,
+                "net_profit_margin": None,
+            },
+        }
+
+    company = extract_company(document_text)
+
+    fiscal_year = extract_fiscal_year(document_text)
+
+    revenue = extract_revenue(document_text)
+
+    net_profit = extract_net_profit(document_text)
+
+    assets = extract_assets(document_text)
+
+    liabilities = extract_liabilities(document_text)
+
+    cash_flow = extract_cash_flow(document_text)
+
+    eps = extract_eps(document_text)
+
+    current_ratio = extract_current_ratio(document_text)
+
+    debt_to_equity = extract_debt_to_equity(document_text)
+
+    if revenue is not None and revenue != 0 and net_profit is not None:
+        net_profit_margin = (
+            net_profit / revenue
+        ) * 100
+    else:
+        net_profit_margin = None
+
+    return {
+        "metric_id": metric_id,
+        "document_id": document_id,
+        "company": company,
+        "fiscal_year": fiscal_year,
+        "revenue": revenue,
+        "net_profit": net_profit,
+        "assets": assets,
+        "liabilities": liabilities,
+        "cash_flow": cash_flow,
+        "eps": eps,
+        "ratios": {
+            "current_ratio": current_ratio,
+            "debt_to_equity": debt_to_equity,
+            "net_profit_margin": net_profit_margin,
+        },
+    }
+# agents/extraction_agent/tasks.py
+
+import re
+from typing import Optional
+
+from agents.extraction_agent.ollama_extraction import extract_with_ollama
+from agents.extraction_agent.regex_extraction import extract_fiscal_year
+
+# ---------------------------------------------------------
+# Metadata extraction
+# ---------------------------------------------------------
+def extract_company_name(document_text: str) -> Optional[str]:
+    """
+    Extract company name from an annual report.
+
+    Handles SEC 10-K formats where the company name appears
+    immediately before:
+        (Exact name of registrant...)
+    """
+
+    if not document_text:
+        return None
+
+    text = document_text
+
+    # -----------------------------------------------------
+    # 1. SEC registrant format
+    # -----------------------------------------------------
+
+    sec_pattern = re.compile(
+        r"""
+        (?P<prefix>.{0,500}?)
+        \(
+            \s*Exact\s+
+            (?:Name|name)\s+
+            of\s+
+            registrant
+            (?:\s+as\s+specified\s+in\s+its\s+charter)?
+        """,
+        re.IGNORECASE | re.VERBOSE | re.DOTALL,
+    )
+
+    for match in sec_pattern.finditer(text):
+
+        prefix = match.group("prefix")
+
+        # Find the LAST legal company name before the SEC label.
+        legal_pattern = re.compile(
+            r"""
+            ([A-Za-z][A-Za-z0-9&.,'â€™\- ]{1,100}?
+            (?:Inc\.?|Incorporated|Corporation|Corp\.?|
+               Company|Co\.?|Ltd\.?|Limited|PLC))
+            \s*$
+            """,
+            re.IGNORECASE | re.VERBOSE,
+        )
+
+        legal_matches = list(
+            legal_pattern.finditer(prefix)
+        )
+
+        if legal_matches:
+            company = legal_matches[-1].group(1).strip()
+
+            # Remove accidental leading filing text.
+            company = re.sub(
+                r"^(?:.*?\b(?:Number|number)\s+[0-9\-]+\s+)",
+                "",
+                company,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            return company
+
+    # -----------------------------------------------------
+    # 2. Known legal-name fallback
+    # -----------------------------------------------------
+
+    fallback_patterns = [
+        r"\b(Walmart\s+Inc\.?)\b",
+        r"\b(Amazon(?:\.com)?\s*,?\s*Inc\.?)\b",
+        r"\b(NVIDIA\s+Corporation)\b",
+        r"\b(Tesla\s*,?\s*Inc\.?)\b",
+        r"\b(PepsiCo\s*,?\s*Inc\.?)\b",
+        r"\b(Colgate-Palmolive\s+Company)\b",
+        r"\b(Johnson\s*&\s*Johnson)\b",
+    ]
+
+    for pattern in fallback_patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).strip()
+
+    return None
+# ---------------------------------------------------------
+# Ratio calculations
+# ---------------------------------------------------------
+
+def calculate_ratios(metrics: dict) -> dict:
+    """
+    Calculate ratios that can be reliably derived from
+    the extracted financial metrics.
+
+    Net profit margin:
+        net profit / revenue * 100
+
+    Debt-to-equity:
+        liabilities / equity
+
+    Equity:
+        assets - liabilities
+
+    Current ratio requires:
+        current assets / current liabilities
+
+    Those values are not part of the locked extraction
+    schema, so current_ratio remains None.
+    """
+
+    revenue = metrics.get("revenue")
+    net_profit = metrics.get("net_profit")
+    assets = metrics.get("assets")
+    liabilities = metrics.get("liabilities")
+
+    current_ratio = None
+    debt_to_equity = None
+    net_profit_margin = None
+
+    # Net profit margin
+    if (
+        revenue is not None
+        and net_profit is not None
+        and revenue != 0
+    ):
+        net_profit_margin = (
+            float(net_profit) / float(revenue)
+        ) * 100
+
+    # Debt-to-equity
+    if (
+        assets is not None
+        and liabilities is not None
+    ):
+        equity = float(assets) - float(liabilities)
+
+        if equity != 0:
+            debt_to_equity = (
+                float(liabilities) / equity
+            )
+
+    return {
+        "current_ratio": current_ratio,
+        "debt_to_equity": debt_to_equity,
+        "net_profit_margin": net_profit_margin,
+    }
+
+
+# ---------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------
+
+def _sanity_check(metrics: dict) -> dict:
+    """
+    Protect the API from obviously incorrect extraction results.
+    """
+
+    checked = dict(metrics)
+
+    # EPS should be a per-share number, not a share count.
+    eps = checked.get("eps")
+
+    if eps is not None:
+        if not isinstance(eps, (int, float)):
+            checked["eps"] = None
+
+        elif abs(eps) > 1000:
+            checked["eps"] = None
+
+    # Financial statement totals should not normally be negative.
+    for field in [
+        "revenue",
+        "assets",
+        "liabilities",
+    ]:
+        value = checked.get(field)
+
+        if value is not None:
+            if not isinstance(value, (int, float)):
+                checked[field] = None
+
+    return checked
+
+
+# ---------------------------------------------------------
+# Main extraction function
+# ---------------------------------------------------------
+
+def run_extraction(
+    document_text: str,
+    document_id: str = "D001",
+):
+    """
+    Main extraction pipeline.
+
+    Flow:
+
+        PDF
+         â†“
+        ChromaDB
+         â†“
+        document_fetcher
+         â†“
+        financial_section_selector
+         â†“
+        Ollama / Llama 3.2
+         â†“
+        financial row identification
+         â†“
+        Python exact number extraction
+         â†“
+        API response format
+    """
+
+    if not document_text:
+        raise ValueError(
+            "No document text available for extraction."
+        )
+
+    # -----------------------------------------------------
+    # 1. Extract metadata
+    # -----------------------------------------------------
+
+    company = extract_company_name(document_text)
+
+    fiscal_year = extract_fiscal_year(document_text)
+
+    # -----------------------------------------------------
+    # 2. Run Ollama extraction
+    # -----------------------------------------------------
+
+    ollama_result = extract_with_ollama(
+        document_text
+    )
+
+    # Example:
+    #
+    # {
+    #     "model": "llama3.2:latest",
+    #     "rows": {...},
+    #     "metrics": {
+    #         "revenue": 94827.0,
+    #         "net_profit": 3794.0,
+    #         ...
+    #     }
+    # }
+
+    metrics = ollama_result.get(
+        "metrics",
+        {},
+    )
+
+    # -----------------------------------------------------
+    # 3. Sanity-check extracted values
+    # -----------------------------------------------------
+
+    metrics = _sanity_check(metrics)
+
+    # -----------------------------------------------------
+    # 4. Calculate ratios
+    # -----------------------------------------------------
+
+    ratios = calculate_ratios(metrics)
+
+    # -----------------------------------------------------
+    # 5. Build the locked API response
+    # -----------------------------------------------------
+
+    result = {
+        "metric_id": "M001",
+        "document_id": document_id,
+        "company": company or "Unknown",
+        "fiscal_year": fiscal_year or 0,
+
+        "revenue": metrics.get("revenue"),
+        "net_profit": metrics.get("net_profit"),
+        "assets": metrics.get("assets"),
+        "liabilities": metrics.get("liabilities"),
+        "cash_flow": metrics.get("cash_flow"),
+        "eps": metrics.get("eps"),
+
+        "ratios": ratios,
+    }
+
+    # -----------------------------------------------------
+    # 6. Preserve model information for debugging
+    # -----------------------------------------------------
+
+    result["_model"] = ollama_result.get(
+        "model",
+        "llama3.2:latest",
+    )
+
+    result["_rows"] = ollama_result.get(
+        "rows",
+        {},
+    )
+
+    return result
+# agents/red_flag_agent/agent.py
+import os
+from crewai import Agent, LLM
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+llm = LLM(
+    model="ollama/llama3.2:latest",
+    base_url=OLLAMA_BASE_URL,
+)
+
+
+def create_red_flag_agent():
+    """
+    CrewAI agent scoped ONLY to classifying auditor remarks and
+    going-concern language from retrieved document text.
+
+    Numeric red flags (rising debt, falling margins, cash flow issues,
+    other financial risk) are handled deterministically by
+    agents/red_flag_agent/rules.py -- this agent never sees numeric
+    metrics and must not invent them. It only classifies text that
+    was actually retrieved from the filing.
+    """
+    return Agent(
+        role="Auditor Remarks Classification Specialist",
+        goal=(
+            "Read the provided excerpts from a company's audit report "
+            "and related notes, and classify whether they contain a "
+            "qualified opinion, going-concern language, a material "
+            "weakness disclosure, or other significant audit "
+            "observations. Base every finding strictly on the "
+            "provided text -- never infer or invent findings not "
+            "present in it."
+        ),
+        backstory=(
+            "You are a specialist reviewer who reads auditor's "
+            "reports and financial statement notes to identify audit "
+            "qualifications and going-concern disclosures. You are "
+            "conservative: if the text does not clearly support a "
+            "finding, you report that no confirmed finding was "
+            "identified rather than guessing."
+        ),
+        llm=llm,
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5,
+    )
+# agents/red_flag_agent/crew.py
+import json
+import re
+
+from crewai import Crew, Process
+
+from agents.red_flag_agent.agent import create_red_flag_agent
+from agents.red_flag_agent.tasks import create_red_flag_task
+
+
+def _extract_json(raw: str) -> dict:
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in LLM output: {raw[:200]}")
+    return json.loads(match.group(0))
+
+
+async def run_auditor_classification(document_text: str) -> list[dict]:
+    """
+    Runs the auditor-remarks-only CrewAI crew against the given
+    (already keyword-filtered) excerpts and returns a list of finding
+    dicts, or an empty list if none were found or output couldn't be
+    parsed.
+
+    Uses kickoff_async() because this is always called from FastAPI's
+    async event loop (see services/red_flag_service.py) -- CrewAI's
+    synchronous kickoff() raises RuntimeError if invoked from inside a
+    running event loop.
+    """
+    agent = create_red_flag_agent()
+    task = create_red_flag_task(agent, document_text)
+
+    crew = Crew(
+        agents=[agent],
+        tasks=[task],
+        process=Process.sequential,
+        verbose=True,
+    )
+
+    result = await crew.kickoff_async()
+    raw_output = str(result)
+
+    try:
+        parsed = _extract_json(raw_output)
+    except (ValueError, json.JSONDecodeError):
+        return []
+
+    return parsed.get("findings", [])
+# agents/red_flag_agent/document_context.py
+"""
+Lightweight keyword-based retrieval for the auditor-remarks LLM layer.
+
+Rather than feeding an entire filing (which can run 60+ pages) into the
+LLM, this pulls only the chunks that are plausibly relevant to auditor
+opinions / going-concern language, plus one neighboring chunk on each
+side for context. This keeps the LLM call fast and scoped -- the model
+only ever sees text actually retrieved from the document, never
+numbers it has to interpret itself.
+"""
+from vectorstore.chroma_client import collection
+
+AUDITOR_KEYWORDS = [
+    "auditor", "audit opinion", "independent registered public accounting",
+    "going concern", "qualified opinion", "adverse opinion",
+    "material weakness", "material uncertainty",
+    "internal control over financial reporting",
+    "substantial doubt", "emphasis of matter",
+]
+
+MAX_CONTEXT_CHARS = 8000
+
+
+def fetch_auditor_context(document_id: str) -> str | None:
+    """
+    Returns a bounded block of text containing only chunks likely to
+    discuss auditor opinions/going-concern language, or None if no
+    such chunks were found -- in which case the LLM should not be
+    called at all, since there's nothing grounded to classify.
+    """
+    result = collection.get(
+        where={"document_id": document_id},
+        include=["documents", "metadatas"],
+    )
+
+    ids = result.get("ids", [])
+    if not ids:
+        return None
+
+    documents = result.get("documents", [])
+    metadatas = result.get("metadatas", [])
+    paired = list(zip(documents, metadatas))
+    paired.sort(key=lambda item: (item[1]["page"], item[1]["chunk_index"]))
+
+    matched_indices = set()
+    for i, (text, _meta) in enumerate(paired):
+        lowered = text.lower()
+        if any(kw in lowered for kw in AUDITOR_KEYWORDS):
+            matched_indices.add(i)
+            if i > 0:
+                matched_indices.add(i - 1)
+            if i < len(paired) - 1:
+                matched_indices.add(i + 1)
+
+    if not matched_indices:
+        return None
+
+    selected = sorted(matched_indices)
+    blocks = []
+    total_len = 0
+    for i in selected:
+        text, meta = paired[i]
+        block = f"[Page {meta.get('page')}]\n{text}"
+        if total_len + len(block) > MAX_CONTEXT_CHARS:
+            break
+        blocks.append(block)
+        total_len += len(block)
+
+    return "\n\n---\n\n".join(blocks) if blocks else None
+# agents/red_flag_agent/rules.py
+"""
+Deterministic rule engine for numeric red-flag detection.
+
+Operates only on structured ExtractionResponse data (revenue, net_profit,
+assets, liabilities, cash_flow, eps, ratios). Never touches an LLM --
+every flag here is reproducible and traceable to a specific metric_id,
+satisfying the project's "strictly grounded" requirement.
+
+NOTE: this currently runs on a SINGLE fiscal year's data, since the
+Extraction Agent only returns one year per document today. Rules that
+would normally compare year-over-year (e.g. "rising" debt) are
+implemented here as single-year leverage/stress thresholds instead.
+When multi-year ExtractionResponse data becomes available, add a
+second set of functions (e.g. detect_rising_debt_trend) that take a
+list of records sorted by fiscal_year and compare deltas -- do not
+replace these, since single-year stress checks remain useful even
+when multi-year data exists.
+"""
+from typing import Optional
+
+
+def _flag(category: str, title: str, severity: str, explanation: str,
+          evidence: str, metric_id: str) -> dict:
+    return {
+        "category": category,
+        "title": title,
+        "severity": severity,
+        "explanation": explanation,
+        "evidence": evidence,
+        "source_metric_id": metric_id,
+        "page_number": None,
+    }
+
+
+def detect_leverage_risk(data: dict, metric_id: str) -> list[dict]:
+    """Rising Debt category -- single-year leverage check."""
+    flags = []
+    dte = (data.get("ratios") or {}).get("debt_to_equity")
+    liabilities = data.get("liabilities")
+    assets = data.get("assets")
+
+    if dte is not None:
+        if dte > 2.0:
+            flags.append(_flag(
+                "rising_debt", "High Leverage",
+                "HIGH",
+                "Debt-to-equity ratio indicates the company is financed "
+                "predominantly by debt relative to equity, increasing "
+                "financial risk if earnings decline.",
+                f"debt_to_equity = {dte}", metric_id,
+            ))
+        elif dte > 1.0:
+            flags.append(_flag(
+                "rising_debt", "Elevated Leverage",
+                "MEDIUM",
+                "Debt-to-equity ratio is above 1.0, meaning liabilities "
+                "exceed equity funding.",
+                f"debt_to_equity = {dte}", metric_id,
+            ))
+
+    if liabilities is not None and assets is not None and assets > 0:
+        ratio = liabilities / assets
+        if ratio > 0.7:
+            flags.append(_flag(
+                "rising_debt", "Liabilities Approaching Total Assets",
+                "HIGH" if ratio > 0.85 else "MEDIUM",
+                "Liabilities make up a large share of total assets, "
+                "leaving a thin equity cushion.",
+                f"liabilities/assets = {ratio:.2f} "
+                f"(liabilities={liabilities}, assets={assets})",
+                metric_id,
+            ))
+
+    return flags
+
+
+def detect_margin_weakness(data: dict, metric_id: str) -> list[dict]:
+    """Falling Margins category -- single-year margin-quality check."""
+    flags = []
+    npm = (data.get("ratios") or {}).get("net_profit_margin")
+
+    if npm is not None:
+        if npm < 0:
+            flags.append(_flag(
+                "falling_margins", "Negative Net Profit Margin",
+                "HIGH",
+                "The company reported a net loss relative to revenue "
+                "for the period.",
+                f"net_profit_margin = {npm}%", metric_id,
+            ))
+        elif npm < 5:
+            flags.append(_flag(
+                "falling_margins", "Thin Net Profit Margin",
+                "MEDIUM",
+                "Net profit margin is low, leaving little buffer against "
+                "rising costs or revenue softness.",
+                f"net_profit_margin = {npm}%", metric_id,
+            ))
+
+    return flags
+
+
+def detect_cash_flow_issues(data: dict, metric_id: str) -> list[dict]:
+    """Cash Flow Issues category."""
+    flags = []
+    net_profit = data.get("net_profit")
+    cash_flow = data.get("cash_flow")
+
+    if net_profit is not None and cash_flow is not None:
+        if net_profit > 0 and cash_flow <= 0:
+            flags.append(_flag(
+                "cash_flow_issues", "Profit Not Backed by Cash Flow",
+                "HIGH",
+                "The company reported positive net profit but flat or "
+                "negative cash flow -- a classic earnings-quality "
+                "warning sign (profit may include non-cash items or "
+                "aggressive revenue recognition).",
+                f"net_profit={net_profit}, cash_flow={cash_flow}",
+                metric_id,
+            ))
+        elif net_profit > 0 and cash_flow < (0.5 * net_profit):
+            flags.append(_flag(
+                "cash_flow_issues", "Cash Flow Lagging Reported Profit",
+                "MEDIUM",
+                "Cash flow is materially lower than net profit, worth "
+                "investigating for working-capital or accrual issues.",
+                f"net_profit={net_profit}, cash_flow={cash_flow}",
+                metric_id,
+            ))
+    elif cash_flow is not None and cash_flow < 0:
+        flags.append(_flag(
+            "cash_flow_issues", "Negative Cash Flow",
+            "HIGH",
+            "The company reported negative cash flow for the period.",
+            f"cash_flow={cash_flow}", metric_id,
+        ))
+
+    return flags
+
+
+def detect_financial_risk(data: dict, metric_id: str) -> list[dict]:
+    """Financial Risks category -- liquidity and solvency stress."""
+    flags = []
+    current_ratio = (data.get("ratios") or {}).get("current_ratio")
+    liabilities = data.get("liabilities")
+    assets = data.get("assets")
+
+    if current_ratio is not None:
+        if current_ratio < 1.0:
+            flags.append(_flag(
+                "financial_risk", "Liquidity Risk",
+                "HIGH",
+                "Current ratio below 1.0 means current liabilities "
+                "exceed current assets, a short-term liquidity concern.",
+                f"current_ratio = {current_ratio}", metric_id,
+            ))
+        elif current_ratio < 1.5:
+            flags.append(_flag(
+                "financial_risk", "Tight Liquidity",
+                "MEDIUM",
+                "Current ratio is below the commonly-used 1.5 comfort "
+                "threshold for short-term obligations.",
+                f"current_ratio = {current_ratio}", metric_id,
+            ))
+
+    if liabilities is not None and assets is not None and liabilities > assets:
+        flags.append(_flag(
+            "financial_risk", "Liabilities Exceed Assets",
+            "HIGH",
+            "Total liabilities exceed total assets, indicating negative "
+            "book equity -- a solvency concern.",
+            f"liabilities={liabilities} > assets={assets}", metric_id,
+        ))
+
+    return flags
+
+
+def run_all_rules(data: dict, metric_id: str) -> list[dict]:
+    """
+    Runs every numeric rule category and returns a flat list of flag
+    dicts, ready to be wrapped in RedFlag models.
+    """
+    flags: list[dict] = []
+    flags += detect_leverage_risk(data, metric_id)
+    flags += detect_margin_weakness(data, metric_id)
+    flags += detect_cash_flow_issues(data, metric_id)
+    flags += detect_financial_risk(data, metric_id)
+    return flags
+
+
+def compute_overall_risk(flags: list[dict]) -> str:
+    if any(f["severity"] == "HIGH" for f in flags):
+        return "HIGH"
+    if any(f["severity"] == "MEDIUM" for f in flags):
+        return "MEDIUM"
+    return "LOW"
+# agents/red_flag_agent/tasks.py
+from crewai import Task
+
+AUDITOR_TASK_DESCRIPTION = """
+You are given excerpts retrieved from a company's financial filing
+(auditor's report and/or related notes). Each excerpt is labeled with
+its page number.
+
+Excerpts:
+---
+{document_text}
+---
+
+Classify ONLY what is explicitly stated in these excerpts. Look for:
+- Qualified or adverse audit opinions
+- Going-concern language / substantial doubt about continuing as a
+  going concern
+- Material weaknesses in internal control over financial reporting
+- Material uncertainties or significant audit observations
+
+Respond with ONLY valid JSON (no markdown fences, no commentary
+before or after) in exactly this shape:
+
+{{
+  "findings": [
+    {{
+      "title": "short title",
+      "severity": "LOW" | "MEDIUM" | "HIGH",
+      "explanation": "why this matters, in your own words",
+      "evidence": "short paraphrase of the relevant excerpt (not a verbatim quote)",
+      "page_number": <integer or null>
+    }}
+  ]
+}}
+
+If the excerpts do not contain any qualification, going-concern
+language, or material weakness disclosure, return:
+
+{{"findings": []}}
+
+Never invent a finding that is not supported by the excerpts above.
+"""
+
+
+def create_red_flag_task(agent, document_text: str):
+    return Task(
+        description=AUDITOR_TASK_DESCRIPTION.format(document_text=document_text),
+        expected_output=(
+            "A single valid JSON object with a 'findings' array, and "
+            "nothing else."
+        ),
+        agent=agent,
+    )
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Settings:
+    APP_NAME = os.getenv("APP_NAME")
+    APP_VERSION = os.getenv("APP_VERSION")
+
+    HOST = os.getenv("HOST")
+    PORT = int(os.getenv("PORT", 8000))
+
+    SECRET_KEY = os.getenv("SECRET_KEY")
+    ALGORITHM = os.getenv("ALGORITHM")
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30)
+    )
+
+    MONGODB_URL = os.getenv("MONGODB_URL")
+    DATABASE_NAME = os.getenv("DATABASE_NAME")
+
+
+settings = Settings()
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+
+from config.settings import settings
+from models.user import User
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    """
+    Verify JWT token and return the authenticated user.
+    """
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+
+        email: str = payload.get("sub")
+
+        if email is None:
+            raise credentials_exception
+
+    except JWTError:
+        raise credentials_exception
+
+    user = await User.find_one(User.email == email)
+
+    if user is None:
+        raise credentials_exception
+
+    return user
+# Collection name constants â€” avoids typos in strings scattered across the codebase
+USERS = "users"
+COMPANIES = "companies"
+COMPARISON_RESULTS = "comparison_results"
+RED_FLAGS = "red_flags"
+AGENT_RUNS = "agent_runs"
+from pymongo import MongoClient
+from pymongo.database import Database
+
+from config.settings import settings
+
+
+class MongoDB:
+
+    def __init__(self):
+        self.client = MongoClient(settings.MONGODB_URL)
+        self.db: Database = self.client[settings.DATABASE_NAME]
+
+    def get_collection(self, collection_name: str):
+        return self.db[collection_name]
+
+
+mongodb = MongoDB()
+# database/mongo_client.py
+
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+
+from config.settings import settings
+
+from models.user import User
+from models.company import Company
+from models.comparison_result import ComparisonResult
+from models.document import DocumentModel
+from models.red_flag import RedFlagResult
+
+client: AsyncIOMotorClient | None = None
+
+
+async def init_db():
+    global client
+
+    client = AsyncIOMotorClient(
+        settings.MONGODB_URL,
+        connectTimeoutMS=30000,
+        serverSelectionTimeoutMS=30000,
+        socketTimeoutMS=30000,
+    )
+
+    database = client[
+        settings.DATABASE_NAME
+    ]
+
+    await init_beanie(
+        database=database,
+        document_models=[
+            User,
+            Company,
+            ComparisonResult,
+            DocumentModel,
+            RedFlagResult,
+        ],
+    )
+from beanie import Document
+from pydantic import Field
+from datetime import datetime, timezone
+from typing import Optional
+
+
+class Company(Document):
+    name: str = Field(..., min_length=1, max_length=200)
+    ticker: str = Field(..., min_length=1, max_length=10)      # e.g. "AAPL"
+    industry: Optional[str] = None                              # e.g. "Technology"
+    sector: Optional[str] = None                                 # e.g. "Consumer Electronics"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Settings:
+        name = "companies"                # MongoDB collection name
+        indexes = ["ticker"]              # fast lookup by ticker
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "Apple Inc.",
+                "ticker": "AAPL",
+                "industry": "Technology",
+                "sector": "Consumer Electronics",
+            }
+        }
+# models/comparison_result.py
+from beanie import Document, PydanticObjectId
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+from typing import Optional
+
+
+class RatioComparison(BaseModel):
+    """A single financial ratio compared across companies."""
+    ratio_name: str                          # e.g. "P/E Ratio", "Debt-to-Equity"
+    values: dict[str, float]                 # {"AAPL": 28.5, "MSFT": 32.1}
+    industry_average: Optional[float] = None
+    best_performer: Optional[str] = None      # ticker of the best value for this ratio
+
+
+class IndustryRanking(BaseModel):
+    """Where each company stands relative to its peers."""
+    ticker: str
+    rank: int                                 # 1 = best
+    score: Optional[float] = None             # composite score used to rank, if applicable
+
+
+class TrendPoint(BaseModel):
+    """A single point in a trend analysis (e.g. revenue growth over time)."""
+    period: str                               # e.g. "Q1 2025", "FY2024"
+    ticker: str
+    value: float
+
+
+class ComparisonResult(Document):
+    company_ids: list[PydanticObjectId]       # companies included in this comparison
+    tickers: list[str]                        # denormalized for quick display, e.g. ["AAPL", "MSFT"]
+
+    ratio_comparisons: list[RatioComparison] = Field(default_factory=list)
+    industry_rankings: list[IndustryRanking] = Field(default_factory=list)
+    trend_analysis: list[TrendPoint] = Field(default_factory=list)
+
+    summary: Optional[str] = None             # short natural-language summary, filled in by the agent later
+
+    status: str = Field(default="pending")    # pending | running | completed | failed
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
+    class Settings:
+        name = "comparison_results"
+        indexes = ["tickers", "status"]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "company_ids": ["665f1a2b3c4d5e6f7a8b9c0d"],
+                "tickers": ["AAPL", "MSFT"],
+                "status": "pending",
+            }
+        }
+from beanie import Document
+from pydantic import Field
+from datetime import datetime, timezone
+
+
+class DocumentModel(Document):
+    document_id: str
+    filename: str
+    file_path: str
+
+    content_type: str
+    file_size: int
+
+    page_count: int = 0
+    chunk_count: int = 0
+
+    ocr_used: bool = False
+    ocr_page_count: int = 0
+
+    status: str = "uploaded"
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    class Settings:
+        name = "documents"
+# models/red_flag.py
+from beanie import Document
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+from typing import Optional
+
+
+class RedFlag(BaseModel):
+    """A single detected red flag."""
+    category: str          # rising_debt | falling_margins | cash_flow_issues | financial_risk | auditor_remarks
+    title: str
+    severity: str           # LOW | MEDIUM | HIGH
+    explanation: str
+    evidence: str
+    source_metric_id: Optional[str] = None   # links back to the ExtractionResponse.metric_id
+    page_number: Optional[int] = None        # only populated by the auditor-remarks (LLM) layer
+
+
+class RedFlagResult(Document):
+    document_id: str
+    company: str
+    fiscal_year: int
+    metric_id: str                            # the ExtractionResponse this analysis was run against
+
+    flags: list[RedFlag] = Field(default_factory=list)
+    overall_risk: Optional[str] = None         # LOW | MEDIUM | HIGH, derived from flags
+
+    status: str = Field(default="pending")     # pending | running | completed | failed
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
+    class Settings:
+        name = "red_flags"
+        indexes = ["document_id", "company", "status"]
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "document_id": "D09AE81D6",
+                "company": "NVIDIA CORPORATION",
+                "fiscal_year": 2025,
+                "status": "completed",
+            }
+        }
+from beanie import Document
+from pydantic import EmailStr, Field
+from datetime import datetime, timezone
+
+
+class User(Document):
+    user_id: str
+    username: str
+    email: EmailStr
+    hashed_password: str
+
+    role: str = "user"
+    is_active: bool = True
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    class Settings:
+        name = "users"
+from fastapi import APIRouter, Depends
+from fastapi.security import OAuth2PasswordRequestForm
+
+from schemas.auth_schema import SignupRequest
+from services.auth_service import AuthService
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"]
+)
+
+
+@router.post("/signup")
+def signup(user: SignupRequest):
+    """
+    Register a new user.
+    """
+    return AuthService.signup(user)
+
+
+@router.post("/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Login existing user using OAuth2 Password Flow.
+    Swagger Authorize button uses this endpoint.
+    """
+    return AuthService.login(
+        form_data.username,
+        form_data.password
+    )
+from fastapi import APIRouter, Depends, Query
+
+from schemas.company_schema import CompanyCreate, CompanyUpdate, CompanyResponse
+from services import company_service
+from core.dependencies import get_current_user
+
+router = APIRouter(prefix="/companies", tags=["Companies"])
+
+
+@router.post("/", response_model=CompanyResponse, status_code=201)
+async def create_company(
+    payload: CompanyCreate,
+    current_user=Depends(get_current_user),
+):
+    return await company_service.create_company(payload)
+
+
+@router.get("/", response_model=list[CompanyResponse])
+async def list_companies(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, le=200),
+    current_user=Depends(get_current_user),
+):
+    return await company_service.list_companies(skip=skip, limit=limit)
+
+
+@router.get("/ticker/{ticker}", response_model=CompanyResponse)
+async def get_company_by_ticker(
+    ticker: str,
+    current_user=Depends(get_current_user),
+):
+    return await company_service.get_company_by_ticker(ticker)
+
+
+@router.get("/{company_id}", response_model=CompanyResponse)
+async def get_company(
+    company_id: str,
+    current_user=Depends(get_current_user),
+):
+    return await company_service.get_company(company_id)
+
+
+@router.patch("/{company_id}", response_model=CompanyResponse)
+async def update_company(
+    company_id: str,
+    payload: CompanyUpdate,
+    current_user=Depends(get_current_user),
+):
+    return await company_service.update_company(company_id, payload)
+
+
+@router.delete("/{company_id}", status_code=204)
+async def delete_company(
+    company_id: str,
+    current_user=Depends(get_current_user),
+):
+    await company_service.delete_company(company_id)
+# routes/comparison.py
+from fastapi import APIRouter, Depends, Query
+
+from schemas.comparison_schema import ComparisonRequest, ComparisonResponse
+from services import comparison_service
+from core.dependencies import get_current_user
+
+router = APIRouter(prefix="/comparison", tags=["Comparison"])
+
+
+@router.post("/run", response_model=ComparisonResponse, status_code=201)
+async def run_comparison(
+    payload: ComparisonRequest,
+    current_user=Depends(get_current_user),
+):
+    """
+    Triggers a comparison across the given companies and returns the result.
+
+    NOTE: until the Comparison Agent is built (Milestone 3), this returns
+    a result computed from placeholder ratio data so the API contract is
+    stable and testable now. See services/comparison_service.py.
+    """
+    return await comparison_service.run_comparison(payload.company_ids)
+
+
+@router.get("/", response_model=list[ComparisonResponse])
+async def list_comparisons(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, le=200),
+    current_user=Depends(get_current_user),
+):
+    return await comparison_service.list_comparisons(skip=skip, limit=limit)
+
+
+@router.get("/{comparison_id}", response_model=ComparisonResponse)
+async def get_comparison(
+    comparison_id: str,
+    current_user=Depends(get_current_user),
+):
+    return await comparison_service.get_comparison(comparison_id)
+from fastapi import APIRouter, Depends, UploadFile, File
+
+from services.document_service import DocumentService
+from utils.security import get_current_user
+
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Documents"]
+)
+
+
+@router.post("/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user)
+):
+    # Execute the actual document ingestion pipeline.
+    result = await DocumentService.process_upload(file)
+
+    return result
+
+@router.get("/{document_id}")
+async def get_document(
+    document_id: str,
+    current_user=Depends(get_current_user)
+):
+    document = await DocumentService.get_document(
+        document_id
+    )
+
+    return {
+        "document_id": document.document_id,
+        "filename": document.filename,
+        "file_size": document.file_size,
+        "page_count": document.page_count,
+        "chunk_count": document.chunk_count,
+        "status": document.status,
+        "created_at": document.created_at,
+        "updated_at": document.updated_at
+    }
+
+
+@router.get("/{document_id}/chunks")
+def get_document_chunks(
+    document_id: str,
+    current_user=Depends(get_current_user)
+):
+    return DocumentService.get_chunks(
+        document_id
+    )
+# routes/extraction.py
+from fastapi import APIRouter, HTTPException, Depends
+
+from agents.extraction_agent.tasks import run_extraction
+from agents.extraction_agent.document_fetcher import fetch_document_text
+from schemas.extraction_schema import ExtractionResponse, ExtractionRequest
+from core.dependencies import get_current_user
+
+router = APIRouter(prefix="/extraction", tags=["Extraction"])
+
+
+@router.get("/{document_id}", response_model=ExtractionResponse)
+def get_extraction(document_id: str, current_user=Depends(get_current_user)):
+    """
+    Runs financial-metric extraction against a document already indexed
+    by the Document Agent (see routes/documents.py). The document must
+    have been uploaded and processed first -- this reads its chunks back
+    out of ChromaDB by document_id.
+
+    NOTE: this is a synchronous ("def", not "async def") route on
+    purpose. It calls out to the Anthropic API via CrewAI, which can
+    take several seconds. FastAPI automatically runs sync route handlers
+    in a worker thread pool, so this does not block the event loop the
+    way a blocking call inside an "async def" route would.
+    """
+    document_text = fetch_document_text(document_id)
+    if document_text is None:
+        raise HTTPException(status_code=404, detail="document not found")
+
+    result = run_extraction(document_text, document_id=document_id)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return result
+
+
+@router.post("/run", response_model=ExtractionResponse)
+def post_extraction(req: ExtractionRequest, current_user=Depends(get_current_user)):
+    return get_extraction(req.document_id, current_user=current_user)
+# routes/red_flag.py
+from fastapi import APIRouter, Depends
+
+from schemas.red_flag_schema import RedFlagResponse, RedFlagRequest
+from services import red_flag_service
+from core.dependencies import get_current_user
+
+router = APIRouter(prefix="/red-flags", tags=["Red Flags"])
+
+
+@router.post("/run", response_model=RedFlagResponse, status_code=201)
+async def run_red_flags(
+    payload: RedFlagRequest,
+    current_user=Depends(get_current_user),
+):
+    return await red_flag_service.run_red_flag_analysis(payload.document_id)
+
+
+@router.get("/document/{document_id}", response_model=list[RedFlagResponse])
+async def get_red_flags_for_document(
+    document_id: str,
+    current_user=Depends(get_current_user),
+):
+    return await red_flag_service.list_red_flags_for_document(document_id)
+
+
+@router.get("/{red_flag_id}", response_model=RedFlagResponse)
+async def get_red_flag(
+    red_flag_id: str,
+    current_user=Depends(get_current_user),
+):
+    return await red_flag_service.get_red_flag_result(red_flag_id)
+from fastapi import APIRouter
+
+from schemas.research_schema import (
+    ExtractRequest,
+    RedFlagRequest,
+)
+
+from services.research_service import ResearchService
+
+router = APIRouter(
+    prefix="/research",
+    tags=["Research"]
+)
+
+
+@router.post("/extract")
+def extract(request: ExtractRequest):
+    """
+    Placeholder extraction endpoint.
+    """
+    return ResearchService.extract(request.document_id)
+
+
+@router.post("/redflag")
+def redflag(request: RedFlagRequest):
+    """
+    Placeholder red flag endpoint.
+    """
+    return ResearchService.red_flags(request.document_id)
+from pydantic import BaseModel, EmailStr, Field
+
+
+class SignupRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    confirm_password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class MessageResponse(BaseModel):
+    message: str
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class CompanyCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    ticker: str = Field(..., min_length=1, max_length=10)
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+
+
+class CompanyUpdate(BaseModel):
+    name: Optional[str] = None
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+
+
+class CompanyResponse(BaseModel):
+    id: str
+    name: str
+    ticker: str
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+# schemas/comparison_schema.py
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class ComparisonRequest(BaseModel):
+    """Body for POST /comparison/run."""
+    company_ids: list[str] = Field(
+        ...,
+        min_length=2,
+        max_length=10,
+        description="Mongo _id strings of the companies to compare (2-10).",
+    )
+
+
+class RatioComparisonResponse(BaseModel):
+    ratio_name: str
+    values: dict[str, float]
+    industry_average: Optional[float] = None
+    best_performer: Optional[str] = None
+
+
+class IndustryRankingResponse(BaseModel):
+    ticker: str
+    rank: int
+    score: Optional[float] = None
+
+
+class TrendPointResponse(BaseModel):
+    period: str
+    ticker: str
+    value: float
+
+
+class ComparisonResponse(BaseModel):
+    id: str
+    company_ids: list[str]
+    tickers: list[str]
+
+    ratio_comparisons: list[RatioComparisonResponse] = Field(default_factory=list)
+    industry_rankings: list[IndustryRankingResponse] = Field(default_factory=list)
+    trend_analysis: list[TrendPointResponse] = Field(default_factory=list)
+
+    summary: Optional[str] = None
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+from pydantic import BaseModel
+
+
+class DocumentResponse(BaseModel):
+    message: str
+    document_id: str
+    filename: str
+    page_count: int
+    chunk_count: int
+    embedding_status: str
+    vector_database: str
+    metadata_database: str
+    ocr_used: bool
+    ocr_page_count: int
+    status: str
+from pydantic import BaseModel
+from typing import Optional
+
+
+class Ratios(BaseModel):
+    current_ratio: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    net_profit_margin: Optional[float] = None
+
+
+class ExtractionResponse(BaseModel):
+    metric_id: str
+    document_id: str
+    company: str
+    fiscal_year: int
+    revenue: Optional[float] = None
+    net_profit: Optional[float] = None
+    assets: Optional[float] = None
+    liabilities: Optional[float] = None
+    cash_flow: Optional[float] = None
+    eps: Optional[float] = None
+    ratios: Ratios
+
+    class Config:
+        from_attributes = True
+
+
+class ExtractionRequest(BaseModel):
+    document_id: str
+# schemas/red_flag_schema.py
+from pydantic import BaseModel
+from typing import Optional
+
+
+class RedFlagItem(BaseModel):
+    category: str
+    title: str
+    severity: str
+    explanation: str
+    evidence: str
+    source_metric_id: Optional[str] = None
+    page_number: Optional[int] = None
+
+
+class RedFlagResponse(BaseModel):
+    id: str
+    document_id: str
+    company: str
+    fiscal_year: int
+    metric_id: str
+    flags: list[RedFlagItem]
+    overall_risk: Optional[str] = None
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+class RedFlagRequest(BaseModel):
+    document_id: str
+from pydantic import BaseModel
+
+
+class ExtractRequest(BaseModel):
+    document_id: str
+
+
+class RedFlagRequest(BaseModel):
+    document_id: str
+from datetime import datetime
+from uuid import uuid4
+
+from fastapi import HTTPException, status
+
+from database.connection import mongodb
+from schemas.auth_schema import SignupRequest
+from utils.security import (
+    create_access_token,
+    hash_password,
+    verify_password,
+)
+
+
+class AuthService:
+
+    users_collection = mongodb.get_collection("users")
+
+    @classmethod
+    def signup(cls, user: SignupRequest):
+        """
+        Register a new user.
+        """
+
+        if user.password != user.confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Passwords do not match."
+            )
+
+        existing_user = cls.users_collection.find_one(
+            {"email": user.email}
+        )
+
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered."
+            )
+
+        new_user = {
+            "user_id": f"U{uuid4().hex[:6].upper()}",
+            "username": user.username,
+            "email": user.email,
+            "hashed_password": hash_password(user.password),
+            "role": "user",
+            "is_active": True,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+
+        cls.users_collection.insert_one(new_user)
+
+        return {
+            "message": "User registered successfully."
+        }
+
+    @classmethod
+    def login(cls, email: str, password: str):
+        """
+        Login existing user.
+        """
+
+        print("=" * 60)
+        print("LOGIN REQUEST")
+        print("Email received:", email)
+
+        existing_user = cls.users_collection.find_one(
+            {"email": email}
+        )
+
+        print("User found:", existing_user)
+
+        if not existing_user:
+            print("âŒ User not found")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password."
+            )
+
+        print("Password entered:", password)
+        print("Stored hash:", existing_user["hashed_password"])
+
+        result = verify_password(
+            password,
+            existing_user["hashed_password"]
+        )
+
+        print("Password verification:", result)
+
+        if not result:
+            print("âŒ Password verification failed")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password."
+            )
+
+        print("âœ… Password verified successfully")
+
+        access_token = create_access_token(
+            {
+                "sub": existing_user["email"]
+            }
+        )
+
+        print("JWT Token Generated")
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer"
+        }
+from fastapi import HTTPException, status
+from beanie import PydanticObjectId
+
+from models.company import Company
+from schemas.company_schema import CompanyCreate, CompanyUpdate, CompanyResponse
+
+
+def _to_response(company: Company) -> CompanyResponse:
+    return CompanyResponse(
+        id=str(company.id),
+        name=company.name,
+        ticker=company.ticker.upper(),
+        industry=company.industry,
+        sector=company.sector,
+        created_at=company.created_at,
+    )
+
+
+async def create_company(payload: CompanyCreate) -> CompanyResponse:
+    existing = await Company.find_one(Company.ticker == payload.ticker.upper())
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Company with ticker '{payload.ticker.upper()}' already exists",
+        )
+
+    company = Company(
+        name=payload.name,
+        ticker=payload.ticker.upper(),
+        industry=payload.industry,
+        sector=payload.sector,
+    )
+    await company.insert()
+    return _to_response(company)
+
+
+async def list_companies(skip: int = 0, limit: int = 50) -> list[CompanyResponse]:
+    companies = await Company.find_all().skip(skip).limit(limit).to_list()
+    return [_to_response(c) for c in companies]
+
+
+async def get_company(company_id: str) -> CompanyResponse:
+    try:
+        obj_id = PydanticObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+
+    company = await Company.get(obj_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return _to_response(company)
+
+
+async def get_company_by_ticker(ticker: str) -> CompanyResponse:
+    company = await Company.find_one(Company.ticker == ticker.upper())
+    if not company:
+        raise HTTPException(status_code=404, detail=f"Company '{ticker.upper()}' not found")
+    return _to_response(company)
+
+
+async def update_company(company_id: str, payload: CompanyUpdate) -> CompanyResponse:
+    try:
+        obj_id = PydanticObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+
+    company = await Company.get(obj_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(company, field, value)
+
+    await company.save()
+    return _to_response(company)
+
+
+async def delete_company(company_id: str) -> None:
+    try:
+        obj_id = PydanticObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+
+    company = await Company.get(obj_id)
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await company.delete()
+# services/comparison_service.py
+"""
+Bridge between the /comparison route and the Comparison Agent
+(agents/comparison_agent/), matching the shared signature agreed with Prem
+for wiring into agents/crew.py in Milestone 3:
+
+    run_comparison(company_ids, extracted_data) -> ComparisonResult
+
+Until the Comparison Agent exists, `run_comparison` computes deterministic
+placeholder ratios/rankings itself so the API is fully functional and
+testable in Milestone 2. Once the Extraction Agent and Comparison Agent are
+ready, `extracted_data` (ticker -> ExtractionResponse-shaped dict) will be
+passed in by the orchestration layer and used instead of the placeholder.
+"""
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import HTTPException, status
+from beanie import PydanticObjectId
+
+from models.company import Company
+from models.comparison_result import (
+    ComparisonResult,
+    RatioComparison,
+    IndustryRanking,
+)
+from schemas.comparison_schema import ComparisonResponse
+
+# Ratios benchmarked until the real Comparison Agent supplies its own
+# selection based on the Extraction Agent's output (Milestone 3).
+_PLACEHOLDER_RATIOS = ["current_ratio", "debt_to_equity", "net_profit_margin"]
+
+
+def _to_response(result: ComparisonResult) -> ComparisonResponse:
+    data = result.model_dump()
+    data["id"] = str(result.id)
+    data["company_ids"] = [str(cid) for cid in result.company_ids]
+    return ComparisonResponse.model_validate(data)
+
+
+async def _resolve_companies(company_ids: list[str]) -> list[Company]:
+    if len(company_ids) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least two companies are required for a comparison",
+        )
+
+    companies: list[Company] = []
+    for cid in company_ids:
+        try:
+            obj_id = PydanticObjectId(cid)
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid company id '{cid}'")
+
+        company = await Company.get(obj_id)
+        if not company:
+            raise HTTPException(status_code=404, detail=f"Company '{cid}' not found")
+        companies.append(company)
+
+    return companies
+
+
+def _build_placeholder_ratios(
+    companies: list[Company],
+    extracted_data: Optional[dict],
+) -> list[RatioComparison]:
+    ratios: list[RatioComparison] = []
+
+    for ratio_name in _PLACEHOLDER_RATIOS:
+        values: dict[str, float] = {}
+        for company in companies:
+            if extracted_data and company.ticker in extracted_data:
+                raw = extracted_data[company.ticker].get("ratios", {}).get(ratio_name)
+                values[company.ticker] = float(raw) if raw is not None else 0.0
+            else:
+                # Deterministic placeholder (not random) so results and
+                # tests are stable until the Extraction Agent exists.
+                seed = sum(ord(c) for c in company.ticker + ratio_name)
+                values[company.ticker] = round((seed % 100) / 10, 2)
+
+        best_ticker = max(values, key=values.get) if values else None
+        industry_avg = round(sum(values.values()) / len(values), 2) if values else None
+
+        ratios.append(
+            RatioComparison(
+                ratio_name=ratio_name,
+                values=values,
+                industry_average=industry_avg,
+                best_performer=best_ticker,
+            )
+        )
+
+    return ratios
+
+
+def _build_placeholder_rankings(
+    ratios: list[RatioComparison],
+    companies: list[Company],
+) -> list[IndustryRanking]:
+    scores: dict[str, float] = {c.ticker: 0.0 for c in companies}
+    for ratio in ratios:
+        for ticker, value in ratio.values.items():
+            scores[ticker] = scores.get(ticker, 0.0) + value
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return [
+        IndustryRanking(ticker=ticker, rank=idx + 1, score=round(score, 2))
+        for idx, (ticker, score) in enumerate(ranked)
+    ]
+
+
+async def run_comparison(
+    company_ids: list[str],
+    extracted_data: Optional[dict] = None,
+) -> ComparisonResponse:
+    companies = await _resolve_companies(company_ids)
+
+    result = ComparisonResult(
+        company_ids=[c.id for c in companies],
+        tickers=[c.ticker for c in companies],
+        status="running",
+    )
+    await result.insert()
+
+    ratios = _build_placeholder_ratios(companies, extracted_data)
+    rankings = _build_placeholder_rankings(ratios, companies)
+
+    result.ratio_comparisons = ratios
+    result.industry_rankings = rankings
+    result.trend_analysis = []  # populated once the Comparison Agent adds historical data (M3)
+    result.summary = (
+        f"Placeholder comparison of {', '.join(c.ticker for c in companies)} "
+        "based on mock ratio data. Will be replaced by the Comparison Agent's "
+        "generated summary in Milestone 3."
+    )
+    result.status = "completed"
+    result.completed_at = datetime.now(timezone.utc)
+    await result.save()
+
+    return _to_response(result)
+
+
+async def get_comparison(comparison_id: str) -> ComparisonResponse:
+    try:
+        obj_id = PydanticObjectId(comparison_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid comparison id")
+
+    result = await ComparisonResult.get(obj_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Comparison result not found")
+    return _to_response(result)
+
+
+async def list_comparisons(skip: int = 0, limit: int = 50) -> list[ComparisonResponse]:
+    results = await ComparisonResult.find_all().skip(skip).limit(limit).to_list()
+    return [_to_response(r) for r in results]
+import os
+import re
+from uuid import uuid4
+from datetime import datetime, timezone
+
+from fastapi import HTTPException, UploadFile
+from pypdf import PdfReader
+
+from models.document import DocumentModel
+from services.ocr_service import OCRService
+from vectorstore.chroma_client import collection
+
+
+UPLOAD_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "documents"
+)
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+class DocumentService:
+
+    ALLOWED_EXTENSIONS = {".pdf"}
+
+    CHUNK_SIZE = 1000
+    CHUNK_OVERLAP = 200
+
+    @classmethod
+    async def process_upload(cls, file: UploadFile):
+
+        # 1. Validate file
+        if not file.filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Filename is required."
+            )
+
+        extension = os.path.splitext(
+            file.filename
+        )[1].lower()
+
+        if extension not in cls.ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Only PDF files are currently supported."
+            )
+
+        # 2. Generate document ID
+        document_id = f"D{uuid4().hex[:8].upper()}"
+
+        safe_filename = re.sub(
+            r"[^a-zA-Z0-9_.-]",
+            "_",
+            file.filename
+        )
+
+        saved_filename = (
+            f"{document_id}_{safe_filename}"
+        )
+
+        file_path = os.path.join(
+            UPLOAD_DIR,
+            saved_filename
+        )
+
+        # 3. Save uploaded PDF
+        content = await file.read()
+
+        with open(file_path, "wb") as output_file:
+            output_file.write(content)
+
+        file_size = len(content)
+
+        # 4. Parse PDF (text layer first, OCR fallback for image-only pages)
+        try:
+            reader = PdfReader(file_path)
+
+            page_count = len(reader.pages)
+
+            pages = []
+            ocr_page_numbers = []
+
+            for page_number, page in enumerate(
+                reader.pages,
+                start=1
+            ):
+                text = page.extract_text() or ""
+                text = text.strip()
+
+                if OCRService.needs_ocr(text):
+                    # Page has no usable text layer (scanned/image page).
+                    # Flag it for OCR instead of dropping it.
+                    ocr_page_numbers.append(page_number)
+                else:
+                    pages.append({
+                        "page": page_number,
+                        "text": text,
+                        "source": "text_layer"
+                    })
+
+        except Exception as exc:
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not parse PDF: {str(exc)}"
+            )
+
+        # 4b. OCR any pages that had no usable text layer
+        ocr_used = False
+
+        if ocr_page_numbers:
+            try:
+                ocr_results = OCRService.extract_pages(
+                    file_path,
+                    ocr_page_numbers
+                )
+            except RuntimeError as exc:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "This document appears to be scanned and OCR "
+                        f"processing failed: {str(exc)}"
+                    )
+                )
+
+            for page_number in ocr_page_numbers:
+                ocr_text = ocr_results.get(page_number, "").strip()
+
+                if ocr_text:
+                    ocr_used = True
+                    pages.append({
+                        "page": page_number,
+                        "text": ocr_text,
+                        "source": "ocr"
+                    })
+
+            # Keep pages in correct reading order after merging
+            # text-layer pages and OCR'd pages.
+            pages.sort(key=lambda p: p["page"])
+
+        ocr_page_count = sum(
+            1 for page_data in pages if page_data["source"] == "ocr"
+        )
+
+        # 5. Create text chunks
+        chunks = []
+
+        for page_data in pages:
+
+            page_number = page_data["page"]
+            text = page_data["text"]
+            source = page_data["source"]
+
+            page_chunks = cls.chunk_text(text)
+
+            for chunk_index, chunk in enumerate(
+                page_chunks
+            ):
+                chunks.append({
+                    "text": chunk,
+                    "page": page_number,
+                    "chunk_index": chunk_index,
+                    "source": source
+                })
+
+        if not chunks:
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No readable text was found in the PDF, even after "
+                    "OCR. The document may be empty, corrupted, or of "
+                    "insufficient scan quality."
+                )
+            )
+
+        # 6. Prepare ChromaDB data
+        ids = []
+        documents = []
+        metadatas = []
+
+        for index, chunk in enumerate(chunks):
+
+            chunk_id = (
+                f"{document_id}_CHUNK_{index}"
+            )
+
+            ids.append(chunk_id)
+
+            documents.append(
+                chunk["text"]
+            )
+
+            metadatas.append({
+                "document_id": document_id,
+                "filename": file.filename,
+                "page": chunk["page"],
+                "chunk_index": chunk["chunk_index"],
+                "source": chunk["source"]
+            })
+
+        # 7. Store chunks in ChromaDB
+        collection.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas
+        )
+
+        # 8. Store metadata in MongoDB
+        now = datetime.now(timezone.utc)
+
+        document = DocumentModel(
+            document_id=document_id,
+            filename=file.filename,
+            file_path=file_path,
+            content_type=(
+                file.content_type or
+                "application/pdf"
+            ),
+            file_size=file_size,
+            page_count=page_count,
+            chunk_count=len(chunks),
+            ocr_used=ocr_used,
+            ocr_page_count=ocr_page_count,
+            status="indexed",
+            created_at=now,
+            updated_at=now
+        )
+
+        await document.insert()
+
+        return {
+    "message": "Document uploaded and indexed successfully.",
+    "document_id": document_id,
+    "filename": file.filename,
+    "page_count": page_count,
+    "chunk_count": len(chunks),
+    "embedding_status": "generated",
+    "vector_database": "ChromaDB",
+    "metadata_database": "MongoDB",
+    "ocr_used": ocr_used,
+    "ocr_page_count": ocr_page_count,
+    "status": "indexed"
+}
+
+    @classmethod
+    def chunk_text(cls, text: str):
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text
+        ).strip()
+
+        chunks = []
+
+        start = 0
+
+        while start < len(text):
+
+            end = start + cls.CHUNK_SIZE
+
+            chunk = text[start:end].strip()
+
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= len(text):
+                break
+
+            start = end - cls.CHUNK_OVERLAP
+
+        return chunks
+
+    @classmethod
+    async def get_document(
+        cls,
+        document_id: str
+    ):
+        """
+        Retrieve document metadata from MongoDB.
+        """
+
+        document = await DocumentModel.find_one(
+            DocumentModel.document_id == document_id
+        )
+
+        if not document:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found."
+            )
+
+        return document
+
+    @classmethod
+    def get_chunks(
+        cls,
+        document_id: str
+    ):
+        """
+        Retrieve document chunks from ChromaDB.
+        """
+
+        result = collection.get(
+            where={
+                "document_id": document_id
+            },
+            include=[
+                "documents",
+                "metadatas"
+            ]
+        )
+
+        return {
+            "document_id": document_id,
+            "chunk_count": len(result.get("ids", [])),
+            "ids": result.get("ids", []),
+            "documents": result.get("documents", []),
+            "metadatas": result.get("metadatas", [])
+        }
+"""
+OCR Service
+-----------
+Provides OCR (Optical Character Recognition) fallback for scanned or
+image-only PDF pages, i.e. pages where pypdf's text-layer extraction
+returns nothing usable.
+
+Two system-level dependencies are required (these are NOT pip packages,
+they must be installed on the machine / container separately):
+
+1. Tesseract OCR engine
+   - Windows: https://github.com/UB-Mannheim/tesseract/wiki
+   - macOS:   brew install tesseract
+   - Ubuntu:  sudo apt-get install tesseract-ocr
+
+2. Poppler (needed by pdf2image to rasterize PDF pages)
+   - Windows: https://github.com/oschwartz10612/poppler-windows/releases
+     (add the extracted "bin" folder to PATH)
+   - macOS:   brew install poppler
+   - Ubuntu:  sudo apt-get install poppler-utils
+
+See backend/OCR_SETUP.md for full setup instructions.
+"""
+
+import io
+import logging
+from typing import List, Dict, Optional
+
+from PIL import Image, ImageOps
+import pytesseract
+from pdf2image import convert_from_path
+
+logger = logging.getLogger(__name__)
+
+
+class OCRService:
+    """
+    Handles OCR extraction for PDF pages that have no (or very little)
+    extractable text layer.
+    """
+
+    # If pypdf's extracted text for a page is shorter than this,
+    # we treat the page as "image-only" and OCR it instead.
+    MIN_TEXT_LENGTH = 20
+
+    # DPI used when rasterizing PDF pages to images before OCR.
+    # Higher = more accurate but slower. 300 is a good default for
+    # financial documents with small print / tables.
+    RENDER_DPI = 300
+
+    # Tesseract language(s). Add more with '+', e.g. "eng+fra".
+    OCR_LANGUAGES = "eng"
+
+    @classmethod
+    def needs_ocr(cls, extracted_text: str) -> bool:
+        """
+        Decide whether a page's pypdf-extracted text is usable, or
+        whether the page should be sent through OCR instead.
+        """
+        if not extracted_text:
+            return True
+
+        return len(extracted_text.strip()) < cls.MIN_TEXT_LENGTH
+
+    @classmethod
+    def _preprocess_image(cls, image: Image.Image) -> Image.Image:
+        """
+        Lightweight preprocessing to improve OCR accuracy:
+        - convert to grayscale
+        - auto-contrast
+        No heavy CV dependencies (opencv, numpy pipelines) are used,
+        to keep this in line with the project's existing footprint.
+        """
+        gray = image.convert("L")
+        return ImageOps.autocontrast(gray)
+
+    @classmethod
+    def ocr_page_image(cls, image: Image.Image) -> str:
+        """
+        Run Tesseract OCR on a single PIL image and return cleaned text.
+        """
+        processed = cls._preprocess_image(image)
+
+        text = pytesseract.image_to_string(
+            processed,
+            lang=cls.OCR_LANGUAGES,
+        )
+
+        return text.strip()
+
+    @classmethod
+    def extract_pages(
+        cls,
+        file_path: str,
+        page_numbers: List[int],
+    ) -> Dict[int, str]:
+        """
+        OCR only the given 1-indexed page numbers of a PDF.
+
+        Rendering is restricted to the required page range for
+        efficiency (a scanned 100-page annual report shouldn't force
+        us to rasterize every page if only a handful actually need OCR).
+
+        Returns:
+            { page_number: ocr_text }
+        """
+        if not page_numbers:
+            return {}
+
+        results: Dict[int, str] = {}
+
+        first_page = min(page_numbers)
+        last_page = max(page_numbers)
+
+        try:
+            images = convert_from_path(
+                file_path,
+                dpi=cls.RENDER_DPI,
+                first_page=first_page,
+                last_page=last_page,
+            )
+        except Exception as exc:
+            logger.error("OCR rendering failed for %s: %s", file_path, exc)
+            raise RuntimeError(
+                f"Could not rasterize PDF pages for OCR: {exc}"
+            )
+
+        wanted = set(page_numbers)
+
+        for offset, image in enumerate(images):
+            current_page = first_page + offset
+
+            if current_page not in wanted:
+                continue
+
+            try:
+                text = cls.ocr_page_image(image)
+            except Exception as exc:
+                logger.error(
+                    "OCR failed on page %s of %s: %s",
+                    current_page, file_path, exc
+                )
+                text = ""
+
+            results[current_page] = text
+
+        return results
+
+    @classmethod
+    def extract_full_document(cls, file_path: str, page_count: int) -> Dict[int, str]:
+        """
+        OCR every page of a document. Used when the PDF has no text
+        layer at all (fully scanned document).
+        """
+        all_pages = list(range(1, page_count + 1))
+        return cls.extract_pages(file_path, all_pages)
+# services/red_flag_service.py
+"""
+Bridge between the /red-flags route and the Red Flag Agent.
+
+Layer 1 (this file + agents/red_flag_agent/rules.py): deterministic
+numeric rule engine over ExtractionResponse data -- no LLM involved,
+fully reproducible.
+
+Layer 2 (agents/red_flag_agent/tasks.py + agent.py, added separately):
+LLM-based auditor-remarks classification over raw document text via
+CrewAI + Ollama. Not called from here yet -- see run_full_analysis
+once that layer is wired in.
+"""
+from datetime import datetime, timezone
+
+from fastapi import HTTPException
+
+from agents.extraction_agent.tasks import run_extraction
+from agents.extraction_agent.document_fetcher import fetch_document_text
+from agents.red_flag_agent.rules import run_all_rules, compute_overall_risk
+from models.red_flag import RedFlagResult, RedFlag
+from schemas.red_flag_schema import RedFlagResponse
+import logging
+from agents.red_flag_agent.document_context import fetch_auditor_context
+from agents.red_flag_agent.crew import run_auditor_classification
+
+logger = logging.getLogger(__name__)
+
+def _to_response(result: RedFlagResult) -> RedFlagResponse:
+    data = result.model_dump()
+    data["id"] = str(result.id)
+    return RedFlagResponse.model_validate(data)
+
+
+async def run_red_flag_analysis(document_id: str) -> RedFlagResponse:
+    document_text = fetch_document_text(document_id)
+    if document_text is None:
+        raise HTTPException(status_code=404, detail="document not found")
+
+    extraction = run_extraction(document_text, document_id=document_id)
+    if "error" in extraction:
+        raise HTTPException(status_code=500, detail=extraction["error"])
+
+    metric_id = extraction["metric_id"]
+
+    raw_flags = run_all_rules(extraction, metric_id)
+    # Layer 2: auditor remarks (LLM), scoped to retrieved excerpts only.
+    try:
+        auditor_context = fetch_auditor_context(document_id)
+        if auditor_context:
+            auditor_findings = await run_auditor_classification(auditor_context)
+            for f in auditor_findings:
+                raw_flags.append({
+                    "category": "auditor_remarks",
+                    "title": f.get("title", "Auditor Remark"),
+                    "severity": f.get("severity", "MEDIUM"),
+                    "explanation": f.get("explanation", ""),
+                    "evidence": f.get("evidence", ""),
+                    "source_metric_id": None,
+                    "page_number": f.get("page_number"),
+                })
+    except Exception:
+        logger.exception(
+            "Auditor-remarks classification failed for document_id=%s",
+            document_id,
+        )
+    overall_risk = compute_overall_risk(raw_flags)
+
+    result = RedFlagResult(
+        document_id=document_id,
+        company=extraction["company"],
+        fiscal_year=extraction["fiscal_year"],
+        metric_id=metric_id,
+        flags=[RedFlag(**f) for f in raw_flags],
+        overall_risk=overall_risk,
+        status="completed",
+        completed_at=datetime.now(timezone.utc),
+    )
+    await result.insert()
+
+    return _to_response(result)
+
+
+async def get_red_flag_result(red_flag_id: str) -> RedFlagResponse:
+    from beanie import PydanticObjectId
+    try:
+        obj_id = PydanticObjectId(red_flag_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid red flag result id")
+
+    result = await RedFlagResult.get(obj_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Red flag result not found")
+    return _to_response(result)
+
+
+async def list_red_flags_for_document(document_id: str) -> list[RedFlagResponse]:
+    results = await RedFlagResult.find(
+        RedFlagResult.document_id == document_id
+    ).to_list()
+    return [_to_response(r) for r in results]
+from schemas.extraction_schema import ExtractionResponse
+
+
+class ResearchService:
+
+    @staticmethod
+    def extract(document_id: str):
+
+        return ExtractionResponse(
+            metric_id="M001",
+            document_id=document_id,
+            company="Tesla",
+            fiscal_year=2025,
+
+            revenue=879891,
+            net_profit=74982,
+            assets=247489282,
+            liabilities=628742,
+            cash_flow=82782732,
+            eps=847289,
+
+            ratios={
+                "current_ratio": 1.8,
+                "debt_to_equity": 0.38,
+                "net_profit_margin": 18.9,
+            },
+        )
+
+    @staticmethod
+    def red_flags(document_id: str):
+
+        return {
+            "document_id": document_id,
+            "company": "Tesla",
+            "risk_level": "Low",
+            "red_flags": [
+                "No significant accounting anomalies detected.",
+                "Debt-to-equity ratio is within acceptable range."
+            ]
+        }
+# tests/test_companies.py
+"""
+Tests for the Companies API (routes/companies.py, services/company_service.py).
+
+Uses mongomock-motor as an in-memory MongoDB double so tests don't need a
+real MongoDB instance, and overrides get_current_user so tests don't need a
+real JWT.
+"""
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
+from beanie import init_beanie
+from mongomock_motor import AsyncMongoMockClient
+
+from main import app
+from core.dependencies import get_current_user
+from models.company import Company
+from models.comparison_result import ComparisonResult
+from models.user import User
+
+
+class _FakeUser:
+    email = "test@example.com"
+
+
+async def _override_get_current_user():
+    return _FakeUser()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup_db():
+    client = AsyncMongoMockClient()
+    await init_beanie(
+        database=client["test_db"],
+        document_models=[User, Company, ComparisonResult],
+    )
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    yield
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.mark.asyncio
+async def test_create_company(client):
+    response = await client.post(
+        "/companies/",
+        json={"name": "Apple Inc.", "ticker": "AAPL", "industry": "Technology", "sector": "Consumer Electronics"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["ticker"] == "AAPL"
+    assert body["name"] == "Apple Inc."
+
+
+@pytest.mark.asyncio
+async def test_create_company_duplicate_ticker_conflicts(client):
+    payload = {"name": "Apple Inc.", "ticker": "AAPL"}
+    first = await client.post("/companies/", json=payload)
+    assert first.status_code == 201
+
+    second = await client.post("/companies/", json=payload)
+    assert second.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_list_companies(client):
+    await client.post("/companies/", json={"name": "Apple Inc.", "ticker": "AAPL"})
+    await client.post("/companies/", json={"name": "Microsoft", "ticker": "MSFT"})
+
+    response = await client.get("/companies/")
+    assert response.status_code == 200
+    tickers = {c["ticker"] for c in response.json()}
+    assert tickers == {"AAPL", "MSFT"}
+
+
+@pytest.mark.asyncio
+async def test_get_company_by_ticker(client):
+    await client.post("/companies/", json={"name": "Apple Inc.", "ticker": "AAPL"})
+
+    response = await client.get("/companies/ticker/AAPL")
+    assert response.status_code == 200
+    assert response.json()["ticker"] == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_get_company_by_ticker_not_found(client):
+    response = await client.get("/companies/ticker/ZZZZ")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_company(client):
+    created = await client.post("/companies/", json={"name": "Apple Inc.", "ticker": "AAPL"})
+    company_id = created.json()["id"]
+
+    response = await client.patch(f"/companies/{company_id}", json={"industry": "Tech"})
+    assert response.status_code == 200
+    assert response.json()["industry"] == "Tech"
+
+
+@pytest.mark.asyncio
+async def test_delete_company(client):
+    created = await client.post("/companies/", json={"name": "Apple Inc.", "ticker": "AAPL"})
+    company_id = created.json()["id"]
+
+    response = await client.delete(f"/companies/{company_id}")
+    assert response.status_code == 204
+
+    follow_up = await client.get(f"/companies/{company_id}")
+    assert follow_up.status_code == 404
+# tests/test_comparison_agent.py
+"""
+Tests for the comparison API and service (routes/comparison.py,
+services/comparison_service.py).
+
+These test the Milestone 2 placeholder-ratio behavior. Once the real
+Comparison Agent lands in Milestone 3, add cases that pass `extracted_data`
+into comparison_service.run_comparison and assert it overrides the
+placeholder values.
+"""
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
+from beanie import init_beanie
+from mongomock_motor import AsyncMongoMockClient
+
+from main import app
+from core.dependencies import get_current_user
+from models.company import Company
+from models.comparison_result import ComparisonResult
+from models.user import User
+from services import comparison_service
+
+
+class _FakeUser:
+    email = "test@example.com"
+
+
+async def _override_get_current_user():
+    return _FakeUser()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup_db():
+    client = AsyncMongoMockClient()
+    await init_beanie(
+        database=client["test_db"],
+        document_models=[User, Company, ComparisonResult],
+    )
+    app.dependency_overrides[get_current_user] = _override_get_current_user
+    yield
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+async def _make_company(name: str, ticker: str) -> Company:
+    company = Company(name=name, ticker=ticker)
+    await company.insert()
+    return company
+
+
+@pytest.mark.asyncio
+async def test_run_comparison_requires_at_least_two_companies():
+    apple = await _make_company("Apple Inc.", "AAPL")
+
+    with pytest.raises(Exception):
+        await comparison_service.run_comparison([str(apple.id)])
+
+
+@pytest.mark.asyncio
+async def test_run_comparison_rejects_unknown_company():
+    apple = await _make_company("Apple Inc.", "AAPL")
+
+    with pytest.raises(Exception):
+        await comparison_service.run_comparison([str(apple.id), "000000000000000000000000"])
+
+
+@pytest.mark.asyncio
+async def test_run_comparison_returns_completed_result_with_ratios():
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+
+    result = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
+
+    assert result.status == "completed"
+    assert set(result.tickers) == {"AAPL", "MSFT"}
+    assert len(result.ratio_comparisons) == 3  # current_ratio, debt_to_equity, net_profit_margin
+    for ratio in result.ratio_comparisons:
+        assert set(ratio.values.keys()) == {"AAPL", "MSFT"}
+        assert ratio.best_performer in {"AAPL", "MSFT"}
+    assert len(result.industry_rankings) == 2
+    ranks = sorted(r.rank for r in result.industry_rankings)
+    assert ranks == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_run_comparison_is_deterministic():
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+
+    first = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
+    second = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
+
+    first_values = {r.ratio_name: r.values for r in first.ratio_comparisons}
+    second_values = {r.ratio_name: r.values for r in second.ratio_comparisons}
+    assert first_values == second_values
+
+
+@pytest.mark.asyncio
+async def test_comparison_run_endpoint(client):
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+
+    response = await client.post(
+        "/comparison/run",
+        json={"company_ids": [str(apple.id), str(msft.id)]},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "completed"
+    assert set(body["tickers"]) == {"AAPL", "MSFT"}
+
+
+@pytest.mark.asyncio
+async def test_comparison_run_endpoint_rejects_single_company(client):
+    apple = await _make_company("Apple Inc.", "AAPL")
+
+    response = await client.post("/comparison/run", json={"company_ids": [str(apple.id)]})
+    assert response.status_code == 422  # fails ComparisonRequest's min_length=2
+
+
+@pytest.mark.asyncio
+async def test_get_comparison_endpoint(client):
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+
+    created = await client.post(
+        "/comparison/run",
+        json={"company_ids": [str(apple.id), str(msft.id)]},
+    )
+    comparison_id = created.json()["id"]
+
+    response = await client.get(f"/comparison/{comparison_id}")
+    assert response.status_code == 200
+    assert response.json()["id"] == comparison_id
+
+
+@pytest.mark.asyncio
+async def test_get_comparison_not_found(client):
+    response = await client.get("/comparison/000000000000000000000000")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_comparisons_endpoint(client):
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+    await client.post("/comparison/run", json={"company_ids": [str(apple.id), str(msft.id)]})
+
+    response = await client.get("/comparison/")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+from agents.crew import build_financial_research_crew
+
+crew = build_financial_research_crew()
+
+print("CrewAI initialized successfully!")
+print(crew)
+from datetime import datetime, timedelta, timezone
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from config.settings import settings
+from models.user import User
+
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto"
+)
+
+
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/auth/login"
+)
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(
+    plain_password: str,
+    hashed_password: str
+) -> bool:
+    return pwd_context.verify(
+        plain_password,
+        hashed_password
+    )
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    to_encode.update({
+        "exp": expire
+    })
+
+    encoded_jwt = jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM
+    )
+
+    return encoded_jwt
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme)
+) -> User:
+    """
+    Verify JWT token and return the authenticated user.
+    """
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={
+            "WWW-Authenticate": "Bearer"
+        },
+    )
+
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+
+        email: str = payload.get("sub")
+
+        if email is None:
+            raise credentials_exception
+
+    except JWTError:
+        raise credentials_exception
+
+    user = await User.find_one(
+        User.email == email
+    )
+
+    if user is None:
+        raise credentials_exception
+
+    return user
+import chromadb
+
+
+CHROMA_PATH = "vectorstore/chroma_data"
+
+client = chromadb.PersistentClient(
+    path=CHROMA_PATH
+)
+
+collection = client.get_or_create_collection(
+    name="financial_documents"
+)

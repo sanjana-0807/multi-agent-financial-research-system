@@ -1,12 +1,19 @@
 # tests/test_comparison_agent.py
 """
 Tests for the comparison API and service (routes/comparison.py,
-services/comparison_service.py).
+services/comparison_service.py) now that the real Comparison Agent is
+wired in.
 
-These test the Milestone 2 placeholder-ratio behavior. Once the real
-Comparison Agent lands in Milestone 3, add cases that pass `extracted_data`
-into comparison_service.run_comparison and assert it overrides the
-placeholder values.
+Two things are mocked so these stay fast unit tests instead of
+integration tests requiring a running Ollama instance and real
+uploaded documents:
+
+  - agents.comparison_agent.data_fetcher.get_extractions_for_companies
+    is monkeypatched to return canned ExtractionResponse-shaped dicts,
+    the same shape agents/extraction_agent/tasks.py:run_extraction
+    returns.
+  - services.comparison_service.run_comparison_narrative is
+    monkeypatched to avoid a real Ollama call.
 """
 import pytest
 import pytest_asyncio
@@ -55,6 +62,42 @@ async def _make_company(name: str, ticker: str) -> Company:
     return company
 
 
+def _fake_extraction(company: str, revenue: float, net_profit: float,
+                      assets: float, liabilities: float) -> dict:
+    return {
+        "metric_id": "M001",
+        "document_id": "D_TEST",
+        "company": company,
+        "fiscal_year": 2025,
+        "revenue": revenue,
+        "net_profit": net_profit,
+        "assets": assets,
+        "liabilities": liabilities,
+        "cash_flow": net_profit * 1.1,
+        "eps": 2.5,
+        "ratios": {
+            "current_ratio": 1.5,
+            "debt_to_equity": liabilities / (assets - liabilities),
+            "net_profit_margin": (net_profit / revenue) * 100,
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def mock_narrative(monkeypatch):
+    async def _fake_narrative(comparison_context: str) -> dict:
+        return {
+            "summary": "AAPL outperforms MSFT on revenue and margin.",
+            "highlights": [
+                {"metric": "revenue", "finding": "AAPL leads on revenue."}
+            ],
+        }
+
+    monkeypatch.setattr(
+        comparison_service, "run_comparison_narrative", _fake_narrative
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_comparison_requires_at_least_two_companies():
     apple = await _make_company("Apple Inc.", "AAPL")
@@ -72,38 +115,69 @@ async def test_run_comparison_rejects_unknown_company():
 
 
 @pytest.mark.asyncio
-async def test_run_comparison_returns_completed_result_with_ratios():
+async def test_run_comparison_without_linked_documents_raises_422(monkeypatch):
+    """
+    Companies with no linked/processed document must produce a clear
+    error, never fabricated numbers.
+    """
     apple = await _make_company("Apple Inc.", "AAPL")
     msft = await _make_company("Microsoft", "MSFT")
 
-    result = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
+    async def _no_data(companies):
+        return {}, [c.ticker for c in companies]
+
+    monkeypatch.setattr(
+        comparison_service, "get_extractions_for_companies", _no_data
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await comparison_service.run_comparison([str(apple.id), str(msft.id)])
+
+    assert "422" in str(exc_info.value) or getattr(
+        exc_info.value, "status_code", None
+    ) == 422
+
+
+@pytest.mark.asyncio
+async def test_run_comparison_with_extracted_data_returns_completed_result():
+    apple = await _make_company("Apple Inc.", "AAPL")
+    msft = await _make_company("Microsoft", "MSFT")
+
+    extracted_data = {
+        "AAPL": _fake_extraction("Apple Inc.", 100_000, 25_000, 400_000, 200_000),
+        "MSFT": _fake_extraction("Microsoft", 80_000, 15_000, 350_000, 180_000),
+    }
+
+    result = await comparison_service.run_comparison(
+        [str(apple.id), str(msft.id)], extracted_data=extracted_data
+    )
 
     assert result.status == "completed"
     assert set(result.tickers) == {"AAPL", "MSFT"}
-    assert len(result.ratio_comparisons) == 3  # current_ratio, debt_to_equity, net_profit_margin
-    for ratio in result.ratio_comparisons:
-        assert set(ratio.values.keys()) == {"AAPL", "MSFT"}
-        assert ratio.best_performer in {"AAPL", "MSFT"}
+    assert result.summary == "AAPL outperforms MSFT on revenue and margin."
+
+    ratio_names = {r.ratio_name for r in result.ratio_comparisons}
+    assert "revenue" in ratio_names
+    assert "debt_to_equity" in ratio_names
+
+    revenue_comparison = next(
+        r for r in result.ratio_comparisons if r.ratio_name == "revenue"
+    )
+    assert revenue_comparison.best_performer == "AAPL"  # higher revenue wins
+    assert revenue_comparison.values == {"AAPL": 100_000.0, "MSFT": 80_000.0}
+
+    liabilities_comparison = next(
+        r for r in result.ratio_comparisons if r.ratio_name == "liabilities"
+    )
+    assert liabilities_comparison.best_performer == "MSFT"  # lower liabilities wins
+
     assert len(result.industry_rankings) == 2
     ranks = sorted(r.rank for r in result.industry_rankings)
     assert ranks == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_run_comparison_is_deterministic():
-    apple = await _make_company("Apple Inc.", "AAPL")
-    msft = await _make_company("Microsoft", "MSFT")
-
-    first = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
-    second = await comparison_service.run_comparison([str(apple.id), str(msft.id)])
-
-    first_values = {r.ratio_name: r.values for r in first.ratio_comparisons}
-    second_values = {r.ratio_name: r.values for r in second.ratio_comparisons}
-    assert first_values == second_values
-
-
-@pytest.mark.asyncio
-async def test_comparison_run_endpoint(client):
+async def test_comparison_run_endpoint_with_missing_documents_returns_422(client):
     apple = await _make_company("Apple Inc.", "AAPL")
     msft = await _make_company("Microsoft", "MSFT")
 
@@ -111,10 +185,8 @@ async def test_comparison_run_endpoint(client):
         "/comparison/run",
         json={"company_ids": [str(apple.id), str(msft.id)]},
     )
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "completed"
-    assert set(body["tickers"]) == {"AAPL", "MSFT"}
+    # No documents linked to either company in this test DB.
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -130,15 +202,17 @@ async def test_get_comparison_endpoint(client):
     apple = await _make_company("Apple Inc.", "AAPL")
     msft = await _make_company("Microsoft", "MSFT")
 
-    created = await client.post(
-        "/comparison/run",
-        json={"company_ids": [str(apple.id), str(msft.id)]},
+    extracted_data = {
+        "AAPL": _fake_extraction("Apple Inc.", 100_000, 25_000, 400_000, 200_000),
+        "MSFT": _fake_extraction("Microsoft", 80_000, 15_000, 350_000, 180_000),
+    }
+    result = await comparison_service.run_comparison(
+        [str(apple.id), str(msft.id)], extracted_data=extracted_data
     )
-    comparison_id = created.json()["id"]
 
-    response = await client.get(f"/comparison/{comparison_id}")
+    response = await client.get(f"/comparison/{result.id}")
     assert response.status_code == 200
-    assert response.json()["id"] == comparison_id
+    assert response.json()["id"] == result.id
 
 
 @pytest.mark.asyncio
@@ -151,7 +225,14 @@ async def test_get_comparison_not_found(client):
 async def test_list_comparisons_endpoint(client):
     apple = await _make_company("Apple Inc.", "AAPL")
     msft = await _make_company("Microsoft", "MSFT")
-    await client.post("/comparison/run", json={"company_ids": [str(apple.id), str(msft.id)]})
+
+    extracted_data = {
+        "AAPL": _fake_extraction("Apple Inc.", 100_000, 25_000, 400_000, 200_000),
+        "MSFT": _fake_extraction("Microsoft", 80_000, 15_000, 350_000, 180_000),
+    }
+    await comparison_service.run_comparison(
+        [str(apple.id), str(msft.id)], extracted_data=extracted_data
+    )
 
     response = await client.get("/comparison/")
     assert response.status_code == 200
