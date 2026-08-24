@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { UploadCloud, FileText, X, CheckCircle2 } from 'lucide-react'
 
-function FileDropzone({ accept = '.pdf', file, onFileChange, hint }) {
+function FileDropzone({ accept = '.pdf', file, onFileChange, onFileSelect, hint }) {
   const [isDragOver, setIsDragOver] = useState(false)
+  const notifyFile = onFileSelect || onFileChange
 
   function handleDragOver(e) {
     e.preventDefault()
@@ -17,7 +18,7 @@ function FileDropzone({ accept = '.pdf', file, onFileChange, hint }) {
     e.preventDefault()
     setIsDragOver(false)
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      onFileChange?.(e.dataTransfer.files[0])
+      notifyFile?.(e.dataTransfer.files[0])
     }
   }
 
@@ -42,7 +43,7 @@ function FileDropzone({ accept = '.pdf', file, onFileChange, hint }) {
           </div>
           <button
             type="button"
-            onClick={() => onFileChange?.(null)}
+            onClick={() => notifyFile?.(null)}
             className="text-slate-400 hover:text-rose-600 p-1.5 rounded-xl hover:bg-white transition-colors flex-shrink-0"
             title="Remove selected file"
           >
@@ -75,7 +76,11 @@ function FileDropzone({ accept = '.pdf', file, onFileChange, hint }) {
           <input
             type="file"
             accept={accept}
-            onChange={(e) => onFileChange?.(e.target.files[0])}
+            onChange={(e) => {
+              if (e.target.files && e.target.files[0]) {
+                notifyFile?.(e.target.files[0])
+              }
+            }}
             className="hidden"
           />
         </label>

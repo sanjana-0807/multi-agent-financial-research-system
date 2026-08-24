@@ -1,10 +1,10 @@
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import AppLayout from '../components/layout/AppLayout.jsx'
 import ProtectedRoute from '../components/layout/ProtectedRoute.jsx'
-import WorkspaceDetailPage from '../pages/WorkspaceDetailPage.jsx'
 import LandingPage from '../pages/LandingPage.jsx'
 import LoginPage from '../features/auth/LoginPage.jsx'
 import SignupPage from '../features/auth/SignupPage.jsx'
+import WorkspaceDetailPage from '../pages/WorkspaceDetailPage.jsx'
 import WorkspaceList from '../features/workspace/WorkspaceList.jsx'
 import DocumentUpload from '../features/documents/DocumentUpload.jsx'
 import DocumentList from '../features/documents/DocumentList.jsx'
@@ -20,16 +20,16 @@ import NotFoundPage from '../pages/NotFoundPage.jsx'
 function AppRouter() {
   return (
     <Routes>
-      {/* Landing page — no sidebar */}
+      {/* Public Pages — Standalone, Clean, Zero Sidebar */}
       <Route path="/" element={<LandingPage />} />
+      <Route path="/signup" element={<SignupPage />} />
+      <Route path="/login" element={<LoginPage />} />
 
-      {/* All app routes — sidebar + navbar */}
+      {/* Authenticated Application Workspace — Top Bar + Session Management */}
       <Route element={<AppLayout />}>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/signup" element={<SignupPage />} />
+        <Route path="/sessions" element={<WorkspaceList />} />
         <Route path="/dashboard" element={<WorkspaceDetailPage />} />
         <Route path="/upload" element={<DocumentUpload />} />
-        <Route path="/sessions" element={<WorkspaceList />} />
         <Route path="/upload-history" element={<DocumentList />} />
         <Route path="/metrics" element={<MetricsPage />} />
         <Route path="/ratios" element={<RatiosPage />} />
@@ -44,4 +44,5 @@ function AppRouter() {
     </Routes>
   )
 }
+
 export default AppRouter

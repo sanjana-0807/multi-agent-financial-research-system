@@ -13,7 +13,16 @@ class ComparisonRequest(BaseModel):
         description="Mongo _id strings of the companies to compare (2-10).",
     )
 
-
+class ComparisonRequest(BaseModel):
+    """Body for POST /comparison/run."""
+    workspace_id: str = Field(..., description="Mongo _id of the Workspace these companies belong to")
+    company_ids: list[str] = Field(
+        ...,
+        min_length=2,
+        max_length=10,
+        description="Mongo _id strings of the companies to compare (2-10).",
+    )
+    
 class RatioComparisonResponse(BaseModel):
     ratio_name: str
     values: dict[str, float]

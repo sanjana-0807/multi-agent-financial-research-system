@@ -1,7 +1,7 @@
-import { FolderKanban, FileText, Clock, ArrowRight, Sparkles } from 'lucide-react'
+import { FolderKanban, FileText, Clock, ArrowRight, Sparkles, Trash2 } from 'lucide-react'
 import { formatDate } from '../../utils/formatDate.js'
 
-function WorkspaceCard({ workspace, onClick }) {
+function WorkspaceCard({ workspace, onClick, onDelete }) {
   return (
     <div
       onClick={() => onClick?.(workspace)}
@@ -15,17 +15,32 @@ function WorkspaceCard({ workspace, onClick }) {
         <div className="w-11 h-11 rounded-xl bg-blue-50/80 border border-blue-100 flex items-center justify-center text-blue-600 group-hover:scale-110 group-hover:bg-blue-600 group-hover:text-white transition-all duration-300 shadow-xs">
           <FolderKanban size={20} />
         </div>
-        <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80">
-          <Sparkles size={10} className="text-blue-500" /> Active Session
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80">
+            <Sparkles size={10} className="text-blue-500" /> Active Session
+          </span>
+          {onDelete && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onDelete(workspace.id)
+              }}
+              className="text-slate-300 hover:text-rose-600 p-1 rounded-md hover:bg-rose-50 transition-colors"
+              title="Delete session"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Title & Description */}
-      <h3 className="text-base font-bold text-slate-900 group-hover:text-blue-600 transition-colors mb-1 tracking-tight">
+      <h3 className="text-base font-bold text-slate-900 group-hover:text-blue-600 transition-colors mb-1 tracking-tight truncate">
         {workspace.name || 'Untitled Research Session'}
       </h3>
       <p className="text-xs font-medium text-slate-500 mb-4 line-clamp-2 leading-relaxed">
-        {workspace.description || 'Comprehensive financial report and ratio analysis session.'}
+        {workspace.objective || workspace.description || 'Comprehensive financial report and ratio analysis session.'}
       </p>
 
       {/* Metadata Footer */}
@@ -33,7 +48,7 @@ function WorkspaceCard({ workspace, onClick }) {
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-slate-600">
             <FileText size={13} className="text-blue-500" />
-            {workspace.document_count ?? 0} Disclosures
+            {workspace.document_count ?? (workspace.documents?.length || 0)} Disclosures
           </span>
           <span className="flex items-center gap-1 text-slate-400">
             <Clock size={13} />
@@ -41,8 +56,8 @@ function WorkspaceCard({ workspace, onClick }) {
           </span>
         </div>
 
-        <div className="text-blue-600 group-hover:translate-x-1 transition-transform flex items-center gap-0.5">
-          <span className="text-xs font-bold">Open</span>
+        <div className="text-blue-600 group-hover:translate-x-1 transition-transform flex items-center gap-0.5 font-bold">
+          <span>Open</span>
           <ArrowRight size={14} />
         </div>
       </div>
@@ -51,4 +66,3 @@ function WorkspaceCard({ workspace, onClick }) {
 }
 
 export default WorkspaceCard
-

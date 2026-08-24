@@ -13,5 +13,10 @@ export function signup(username, email, password, confirmPassword) {
 }
 
 export function login(email, password) {
-  return axiosClient.post('/auth/login', { username: email, password })
+  const formData = new URLSearchParams()
+  formData.append('username', email)
+  formData.append('password', password)
+  return axiosClient.post('/auth/login', formData, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  })
 }

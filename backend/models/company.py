@@ -1,10 +1,11 @@
-from beanie import Document
+from beanie import Document, PydanticObjectId
 from pydantic import Field
 from datetime import datetime, timezone
 from typing import Optional
 
 
 class Company(Document):
+    workspace_id: PydanticObjectId
     name: str = Field(..., min_length=1, max_length=200)
     ticker: str = Field(..., min_length=1, max_length=10)      # e.g. "AAPL"
     industry: Optional[str] = None                              # e.g. "Technology"

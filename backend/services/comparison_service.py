@@ -29,6 +29,8 @@ from beanie import PydanticObjectId
 from models.company import Company
 from models.comparison_result import ComparisonResult
 from schemas.comparison_schema import ComparisonResponse
+from models.user import User
+from models.workspace import Workspace
 
 from agents.comparison_agent.data_fetcher import get_extractions_for_companies
 from agents.comparison_agent.benchmarking import (
@@ -46,7 +48,7 @@ def _to_response(result: ComparisonResult) -> ComparisonResponse:
     return ComparisonResponse.model_validate(data)
 
 
-async def _resolve_companies(company_ids: list[str]) -> list[Company]:
+async def _resolve_companies(company_ids: list[str], workspace: Workspace) -> list[Company]:
     if len(company_ids) < 2:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -63,6 +65,11 @@ async def _resolve_companies(company_ids: list[str]) -> list[Company]:
         company = await Company.get(obj_id)
         if not company:
             raise HTTPException(status_code=404, detail=f"Company '{cid}' not found")
+        if company.workspace_id != workspace.id:                      
+            raise HTTPException(                                       
+                status_code=403,                                       
+                detail=f"Company '{cid}' does not belong to this workspace",  
+            )  
         companies.append(company)
 
     return companies
@@ -70,9 +77,14 @@ async def _resolve_companies(company_ids: list[str]) -> list[Company]:
 
 async def run_comparison(
     company_ids: list[str],
+    workspace_id: str,                    
+    current_user: "User",
     extracted_data: Optional[dict] = None,
 ) -> ComparisonResponse:
-    companies = await _resolve_companies(company_ids)
+    from services.workspace_service import get_workspace   
+    workspace = await get_workspace(workspace_id, current_user)  
+
+    companies = await _resolve_companies(company_ids, workspace)
 
     if extracted_data is None:
         extracted_data, missing = await get_extractions_for_companies(companies)

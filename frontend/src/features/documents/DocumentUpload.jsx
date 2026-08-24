@@ -1,109 +1,123 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { UploadCloud, CheckCircle2, AlertCircle, Cpu, Sparkles, ArrowRight } from 'lucide-react'
+import {
+  UploadCloud, CheckCircle2, AlertCircle, Cpu, Sparkles,
+  Database, ShieldCheck, Loader2, AlertTriangle
+} from 'lucide-react'
 import FileDropzone from '../../components/FileDropzone.jsx'
 import Button from '../../components/Button.jsx'
-import Card from '../../components/Card.jsx'
-import { uploadDocument } from '../../api/companiesApi.js'
-import { getExtraction } from '../../api/extractionApi.js'
+import { uploadDocument } from '../../api/documentsApi.js'
+import { runExtraction } from '../../api/extractionApi.js'
+import { runRedFlagAnalysis } from '../../api/redFlagsApi.js'
 import { useWorkspace } from '../../context/WorkspaceContext.jsx'
+
+const PIPELINE_STEPS = [
+  {
+    num: 1,
+    agent: 'Document Agent',
+    label: 'Document Ingestion & ChromaDB Indexing',
+    desc: 'Extracting raw disclosure text, chunking, and generating vector embeddings in ChromaDB.',
+    icon: Database,
+    color: 'text-blue-700 bg-blue-100 border-blue-200'
+  },
+  {
+    num: 2,
+    agent: 'Extraction Agent',
+    label: 'KPI & Financial Metrics Extraction',
+    desc: 'Running LLM reasoning to extract revenue, net profit, margins, EPS, and leverage ratios.',
+    icon: Cpu,
+    color: 'text-indigo-700 bg-indigo-100 border-indigo-200'
+  },
+  {
+    num: 3,
+    agent: 'Red Flag Agent',
+    label: 'Risk Anomaly & Auditor Qualification Scan',
+    desc: 'Evaluating leverage, margins, liquidity, and auditor remarks for risk signals.',
+    icon: ShieldCheck,
+    color: 'text-amber-700 bg-amber-100 border-amber-200'
+  }
+]
+
+function isFinancialDocument(fileName) {
+  if (!fileName) return false
+  const lower = fileName.toLowerCase()
+  return ['.pdf', '.docx', '.doc', '.xlsx', '.xls', '.csv', '.txt'].some((ext) => lower.endsWith(ext))
+}
 
 function DocumentUpload() {
   const navigate = useNavigate()
-  const { setExtractionData, addUploadedDocument, updateDocumentStatus } = useWorkspace()
+  const { activeWorkspace, activeCompany, setPipelineResults } = useWorkspace()
+
   const [file, setFile] = useState(null)
-  const [uploadedDocId, setUploadedDocId] = useState(null)
-  const [uploading, setUploading] = useState(false)
-  const [uploadStep, setUploadStep] = useState(0)
-  const [success, setSuccess] = useState(false)
-  const [error, setError] = useState(null)
-  const [extracting, setExtracting] = useState(false)
+  const [pipelineActive, setPipelineActive] = useState(false)
+  const [activeStepIndex, setActiveStepIndex] = useState(0)
+  const [completedSteps, setCompletedSteps] = useState([])
+  const [validationError, setValidationError] = useState(null)
+  const [pipelineError, setPipelineError] = useState(null)
 
   function handleFileChange(selectedFile) {
     setFile(selectedFile)
-    setUploadedDocId(null)
-    setSuccess(false)
-    setError(null)
-    setUploadStep(0)
+    setValidationError(null)
+    setPipelineError(null)
+    setPipelineActive(false)
+    setCompletedSteps([])
+    setActiveStepIndex(0)
+
+    if (selectedFile && !isFinancialDocument(selectedFile.name)) {
+      setValidationError(
+        `"${selectedFile.name}" is not a supported document format. Please upload a PDF, DOCX, XLSX, or CSV filing.`
+      )
+    }
   }
 
-  async function handleUpload() {
-    if (!file) return
-    setUploading(true)
-    setError(null)
-    setSuccess(false)
-    setUploadStep(1)
-
-    const uploadEntry = {
-      id: Date.now().toString(),
-      filename: file.name,
-      company: '—',
-      uploaded_at: new Date().toISOString().split('T')[0],
-      status: 'processing',
-      size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
+  async function handleStartPipeline() {
+    if (!file) {
+      setValidationError('Please select a financial filing before processing.')
+      return
     }
-    addUploadedDocument(uploadEntry)
+    if (!isFinancialDocument(file.name)) {
+      setValidationError(`"${file.name}" is not a supported document format.`)
+      return
+    }
+    if (!activeCompany) {
+      setPipelineError('No active company for this session. Create or open a research session first.')
+      return
+    }
 
-    const stepTimer1 = setTimeout(() => setUploadStep(2), 600)
-    const stepTimer2 = setTimeout(() => setUploadStep(3), 1200)
+    setValidationError(null)
+    setPipelineError(null)
+    setPipelineActive(true)
+    setCompletedSteps([])
+    setActiveStepIndex(0)
 
     try {
-      const res = await uploadDocument(file)
-      const returnedId = res.data?.id || res.data?.document_id || 'D001'
-      setUploadedDocId(returnedId)
-      setUploadStep(4)
-      setSuccess(true)
-      updateDocumentStatus(file.name, 'processed')
+      // Step 1: upload + link to the session's company, indexed into ChromaDB
+      const uploadRes = await uploadDocument(file, activeCompany.id)
+      const documentId = uploadRes.data.document_id
+      setCompletedSteps((prev) => [...prev, 0])
+      setActiveStepIndex(1)
+
+      // Step 2: extraction agent
+      const extractionRes = await runExtraction(documentId)
+      setCompletedSteps((prev) => [...prev, 1])
+      setActiveStepIndex(2)
+
+      // Step 3: red flag agent
+      const redFlagRes = await runRedFlagAnalysis(documentId)
+      setCompletedSteps((prev) => [...prev, 2])
+
+      setPipelineResults({
+        document: { document_id: documentId, filename: file.name, status: 'indexed' },
+        extraction: extractionRes.data,
+        redFlags: redFlagRes.data,
+      })
+
+      setTimeout(() => navigate('/dashboard'), 600)
     } catch (err) {
-      if (err.response?.data?.detail) {
-        setError(err.response.data.detail)
-        updateDocumentStatus(file.name, 'failed')
-      } else {
-        setUploadStep(4)
-        setSuccess(true)
-        updateDocumentStatus(file.name, 'processed')
-      }
-    } finally {
-      clearTimeout(stepTimer1)
-      clearTimeout(stepTimer2)
-      setUploading(false)
+      setPipelineError(err.response?.data?.detail || 'Pipeline failed — please try again.')
+      setPipelineActive(false)
     }
   }
-
-  async function handleExtractAndNavigate() {
-    setExtracting(true)
-    try {
-      const docId = uploadedDocId || 'D001'
-      const res = await getExtraction(docId)
-      
-      if (res.data) {
-        setExtractionData(res.data)
-        if (res.data.company && file?.name) {
-          addUploadedDocument({
-            id: docId,
-            filename: file.name,
-            company: res.data.company,
-            uploaded_at: new Date().toISOString().split('T')[0],
-            status: 'processed',
-            size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
-          })
-        }
-      }
-      navigate('/dashboard')
-    } catch (err) {
-      console.error('Extraction error:', err)
-      navigate('/dashboard')
-    } finally {
-      setExtracting(false)
-    }
-  }
-
-  const INGESTION_STEPS = [
-    { num: 1, label: 'Uploading PDF to Server', desc: 'Validating file header & saving raw PDF' },
-    { num: 2, label: 'Document Agent: Text Chunking', desc: 'Extracting text and chunking into 1000-char pieces' },
-    { num: 3, label: 'ChromaDB Vector Indexing', desc: 'Storing chunk embeddings in ChromaDB financial_documents' },
-    { num: 4, label: 'Document Ready for Extraction', desc: 'Vector chunks indexed with document ID' },
-  ]
 
   return (
     <div className="p-6 md:p-8 max-w-5xl mx-auto space-y-8 animate-fadeIn select-none">
@@ -112,138 +126,116 @@ function DocumentUpload() {
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-600 mb-1">
             <Sparkles size={14} /> Document Ingestion Engine
           </div>
-          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Upload Financial Disclosures</h1>
+          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Upload Financial Documents</h1>
           <p className="text-sm font-medium text-slate-500 mt-1">
-            Upload company 10-K, 10-Q, or annual financial reports (PDF) for automated AI processing.
+            {activeWorkspace
+              ? `Uploading to session: ${activeWorkspace.name}${activeCompany ? ` (${activeCompany.ticker})` : ''}`
+              : 'Upload 10-K, 10-Q or corporate reports (PDF, DOCX up to 50MB)'}
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200/80 self-start md:self-auto">
-          <Cpu size={14} className="text-blue-600 animate-pulse" />
-          <span>Multi-Agent Ingestion Active</span>
+          <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+          <span>3-Agent Pipeline Ready</span>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        <div className="lg:col-span-7 space-y-4">
-          <Card title="PDF Document Ingestion" subtitle="Select or drag & drop a company financial report">
-            <div className="space-y-5">
-              <FileDropzone
-                accept=".pdf"
-                file={file}
-                onFileChange={handleFileChange}
-                hint="Upload company 10-K, 10-Q or financial statements (PDF up to 50MB)"
-              />
-              <Button
-                onClick={handleUpload}
-                disabled={!file || uploading}
-                loading={uploading}
-                icon={UploadCloud}
-                variant="primary"
-                size="lg"
-                className="w-full"
-              >
-                {uploading ? 'Processing Ingestion Pipeline...' : 'Ingest & Process Document'}
-              </Button>
+      {validationError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-3">
+          <AlertTriangle size={18} className="text-rose-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold block">Document Ingestion Rejected</span>
+            <p className="mt-0.5 text-rose-700 leading-relaxed">{validationError}</p>
+          </div>
+        </div>
+      )}
 
-              {uploading && (
-                <div className="p-4 bg-blue-50/50 rounded-2xl border border-blue-100 space-y-3 animate-fadeIn">
-                  <div className="flex items-center justify-between text-xs font-bold text-blue-900">
-                    <span>Ingestion Pipeline Progress</span>
-                    <span>Step {uploadStep} of 4</span>
-                  </div>
-                  <div className="space-y-2">
-                    {INGESTION_STEPS.map((step) => {
-                      const isActive = uploadStep === step.num
-                      const isDone = uploadStep > step.num
-                      return (
-                        <div key={step.num} className="flex items-center gap-3 text-xs">
-                          <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] ${
-                            isDone ? 'bg-emerald-500 text-white' : isActive ? 'bg-blue-600 text-white animate-pulse' : 'bg-slate-200 text-slate-500'
-                          }`}>
-                            {isDone ? <CheckCircle2 size={14} /> : step.num}
-                          </div>
-                          <div>
-                            <span className={`font-bold ${isActive ? 'text-blue-700' : isDone ? 'text-slate-800' : 'text-slate-400'}`}>
-                              {step.label}
-                            </span>
-                            <p className="text-[10px] text-slate-400 font-medium">{step.desc}</p>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+      {pipelineError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-3">
+          <AlertCircle size={18} className="text-rose-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold block">Pipeline Error</span>
+            <p className="mt-0.5 text-rose-700 leading-relaxed">{pipelineError}</p>
+          </div>
+        </div>
+      )}
 
-              {success && (
-                <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-2xl space-y-4 animate-scaleUp">
-                  <div className="flex items-start gap-3">
-                    <CheckCircle2 size={20} className="text-emerald-600 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-bold text-emerald-900 text-sm">Upload & Chunking Complete!</div>
-                      <div className="text-xs text-emerald-700 mt-1">
-                        Document parsed, chunked, and vector-indexed into ChromaDB with ID: <span className="font-mono font-bold">{uploadedDocId || 'D001'}</span>
+      {!pipelineActive ? (
+        <div className="bg-white rounded-3xl border border-slate-200/80 p-8 shadow-3d-subtle space-y-6 text-center">
+          <FileDropzone file={file} onFileSelect={handleFileChange} />
+          <div className="pt-2 flex justify-center">
+            <Button
+              onClick={handleStartPipeline}
+              disabled={!file}
+              icon={Sparkles}
+              variant="primary"
+              size="lg"
+              className="w-full sm:w-auto shadow-lg shadow-blue-500/20"
+            >
+              Ingest & Process Document →
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-white rounded-3xl p-8 border border-slate-200/80 shadow-3d-subtle space-y-6 animate-fadeIn">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div>
+              <span className="text-[10px] font-extrabold uppercase tracking-widest text-blue-600">
+                Live Backend Orchestration
+              </span>
+              <h3 className="text-xl font-extrabold text-slate-900 mt-0.5">3-Agent Sequential Pipeline</h3>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-bold px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700">
+              <Loader2 size={13} className="animate-spin text-blue-600" />
+              <span>Processing Document...</span>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {PIPELINE_STEPS.map((step, idx) => {
+              const isDone = completedSteps.includes(idx)
+              const isActive = activeStepIndex === idx && !isDone
+              return (
+                <div
+                  key={step.num}
+                  className={`p-5 rounded-2xl border transition-all duration-500 flex items-start gap-4 ${
+                    isActive
+                      ? 'bg-blue-50/70 border-blue-300 shadow-md shadow-blue-500/10 scale-[1.01]'
+                      : isDone
+                      ? 'bg-slate-50 border-emerald-300'
+                      : 'bg-slate-50/50 border-slate-200/60 opacity-60'
+                  }`}
+                >
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-black flex-shrink-0 ${
+                      isDone
+                        ? 'bg-emerald-500 text-white'
+                        : isActive
+                        ? 'bg-blue-600 text-white animate-pulse'
+                        : 'bg-slate-200 text-slate-500'
+                    }`}
+                  >
+                    {isDone ? <CheckCircle2 size={20} /> : step.num}
+                  </div>
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full border ${step.color}`}>
+                          {step.agent}
+                        </span>
+                        <h4 className="text-sm font-bold text-slate-900">{step.label}</h4>
                       </div>
+                      <span className={`text-xs font-bold ${isDone ? 'text-emerald-600' : isActive ? 'text-blue-600 animate-pulse' : 'text-slate-400'}`}>
+                        {isDone ? 'Complete ✓' : isActive ? 'Working...' : 'Waiting'}
+                      </span>
                     </div>
-                  </div>
-                  <div className="pt-2 border-t border-emerald-200/60 flex items-center justify-between gap-3">
-                    <span className="text-xs font-medium text-emerald-800">Ready for Financial Extraction</span>
-                    <button
-                      onClick={handleExtractAndNavigate}
-                      disabled={extracting}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-2 transition-all transform active:scale-95 disabled:opacity-60"
-                    >
-                      <Sparkles size={14} />
-                      {extracting ? 'Extracting...' : 'Run Extraction & View Dashboard'}
-                      <ArrowRight size={14} />
-                    </button>
+                    <p className="text-xs text-slate-600 leading-relaxed">{step.desc}</p>
                   </div>
                 </div>
-              )}
-
-              {error && (
-                <div className="flex items-center gap-3 p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800 text-xs font-semibold animate-scaleUp">
-                  <AlertCircle size={18} className="text-rose-600 flex-shrink-0" />
-                  <div>
-                    <div className="font-bold">Upload Failed</div>
-                    <div className="text-rose-700 mt-0.5">{error}</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </Card>
+              )
+            })}
+          </div>
         </div>
-
-        <div className="lg:col-span-5 space-y-4">
-          <Card title="Multi-Agent Pipeline" subtitle="Automated document processing workflow">
-            <div className="space-y-4">
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs flex-shrink-0">1</div>
-                <div>
-                  <h4 className="text-xs font-bold text-slate-800">PDF Ingestion & Validation</h4>
-                  <p className="text-[11px] font-medium text-slate-500 mt-0.5">Validates PDF header and stores file to server.</p>
-                </div>
-              </div>
-              <div className="flex justify-center text-slate-300"><ArrowRight size={14} className="rotate-90" /></div>
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs flex-shrink-0">2</div>
-                <div>
-                  <h4 className="text-xs font-bold text-slate-800">Document Agent: Parsing & Chunking</h4>
-                  <p className="text-[11px] font-medium text-slate-500 mt-0.5">Extracts text and indexes chunks into ChromaDB.</p>
-                </div>
-              </div>
-              <div className="flex justify-center text-slate-300"><ArrowRight size={14} className="rotate-90" /></div>
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs flex-shrink-0">3</div>
-                <div>
-                  <h4 className="text-xs font-bold text-slate-800">Extraction Agent</h4>
-                  <p className="text-[11px] font-medium text-slate-500 mt-0.5">Fetches vector chunks and extracts financial KPIs & ratios.</p>
-                </div>
-              </div>
-            </div>
-          </Card>
-        </div>
-      </div>
+      )}
     </div>
   )
 }

@@ -13,6 +13,9 @@ async def run_comparison(
     payload: ComparisonRequest,
     current_user=Depends(get_current_user),
 ):
+    return await comparison_service.run_comparison(
+        payload.company_ids, payload.workspace_id, current_user
+    )
     """
     Triggers a comparison across the given companies and returns the result.
 

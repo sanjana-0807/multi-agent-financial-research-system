@@ -1,17 +1,16 @@
 import { Building2, Sparkles, Trophy } from 'lucide-react'
 import { formatCurrency } from '../../utils/formatCurrency.js'
-import Badge from '../../components/Badge.jsx'
 
 const METRICS = [
-  { key: 'revenue', label: 'Revenue', format: true, isCurrency: true },
-  { key: 'net_profit', label: 'Net Profit', format: true, isCurrency: true },
-  { key: 'assets', label: 'Total Assets', format: true, isCurrency: true },
-  { key: 'liabilities', label: 'Total Liabilities', format: true, isCurrency: true },
-  { key: 'cash_flow', label: 'Operating Cash Flow', format: true, isCurrency: true },
-  { key: 'eps', label: 'Earnings Per Share (EPS)', format: false, prefix: '$' },
-  { key: 'ratios.current_ratio', label: 'Current Ratio', format: false, suffix: 'x' },
-  { key: 'ratios.debt_to_equity', label: 'Debt to Equity', format: false, suffix: 'x' },
-  { key: 'ratios.net_profit_margin', label: 'Net Profit Margin', format: false, suffix: '%' },
+  { key: 'revenue', label: 'Total Revenue', format: true, isCurrency: true, lowerIsBetter: false },
+  { key: 'net_profit', label: 'Net Profit', format: true, isCurrency: true, lowerIsBetter: false },
+  { key: 'assets', label: 'Total Assets', format: true, isCurrency: true, lowerIsBetter: false },
+  { key: 'liabilities', label: 'Total Liabilities', format: true, isCurrency: true, lowerIsBetter: true },
+  { key: 'cash_flow', label: 'Operating Cash Flow', format: true, isCurrency: true, lowerIsBetter: false },
+  { key: 'eps', label: 'Diluted EPS', format: false, prefix: '$', lowerIsBetter: false },
+  { key: 'ratios.net_profit_margin', label: 'Net Profit Margin', format: false, suffix: '%', lowerIsBetter: false },
+  { key: 'ratios.current_ratio', label: 'Current Ratio', format: false, suffix: '', lowerIsBetter: false },
+  { key: 'ratios.debt_to_equity', label: 'Debt to Equity', format: false, suffix: '×', lowerIsBetter: true },
 ]
 
 function getValue(obj, path) {
@@ -44,7 +43,9 @@ function ComparisonTable({ companies = [] }) {
                       {c.company ? c.company.charAt(0) : 'C'}
                     </div>
                     <div>
-                      <div className="text-sm font-bold text-slate-900 tracking-tight">{c.company || `Company ${i + 1}`}</div>
+                      <div className="text-sm font-bold text-slate-900 tracking-tight truncate max-w-[180px]">
+                        {c.company || `Company ${i + 1}`}
+                      </div>
                       <span className="text-[10px] font-semibold text-blue-600">Verified Filing</span>
                     </div>
                   </div>
@@ -53,25 +54,50 @@ function ComparisonTable({ companies = [] }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {METRICS.map(({ key, label, format, prefix, suffix }) => (
-              <tr key={key} className="hover:bg-blue-50/30 transition-colors">
-                <td className="px-5 py-4 text-slate-700 font-bold text-xs uppercase tracking-wider">
-                  {label}
-                </td>
-                {companies.map((c, i) => {
-                  const val = getValue(c, key)
-                  const formattedVal = val != null 
-                    ? (format ? formatCurrency(val) : `${prefix || ''}${val}${suffix || ''}`) 
-                    : 'N/A'
+            {METRICS.map(({ key, label, format, prefix, suffix, lowerIsBetter }) => {
+              // Extract values for this metric across companies
+              const validEntries = companies
+                .map((c, idx) => ({ idx, val: getValue(c, key) }))
+                .filter((item) => item.val != null && !isNaN(Number(item.val)))
+                .map((item) => ({ ...item, val: Number(item.val) }))
 
-                  return (
-                    <td key={i} className="px-5 py-4 text-slate-900 font-extrabold text-sm">
-                      {formattedVal}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
+              // Find best performer index
+              let bestIdx = null
+              if (validEntries.length > 1) {
+                const bestEntry = lowerIsBetter
+                  ? validEntries.reduce((min, cur) => cur.val < min.val ? cur : min, validEntries[0])
+                  : validEntries.reduce((max, cur) => cur.val > max.val ? cur : max, validEntries[0])
+                bestIdx = bestEntry?.idx
+              }
+
+              return (
+                <tr key={key} className="hover:bg-blue-50/30 transition-colors">
+                  <td className="px-5 py-4 text-slate-700 font-bold text-xs uppercase tracking-wider">
+                    {label}
+                  </td>
+                  {companies.map((c, i) => {
+                    const rawVal = getValue(c, key)
+                    const isBest = bestIdx === i
+                    const formattedVal = rawVal != null 
+                      ? (format ? formatCurrency(rawVal) : `${prefix || ''}${rawVal}${suffix || ''}`) 
+                      : '—'
+
+                    return (
+                      <td key={i} className="px-5 py-4 text-slate-900 font-extrabold text-sm">
+                        <div className="flex items-center gap-2">
+                          <span>{formattedVal}</span>
+                          {isBest && (
+                            <span className="flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                              <Trophy size={10} className="text-amber-500" /> Leader
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

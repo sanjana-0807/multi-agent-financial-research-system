@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, Sparkles, Calendar, CheckCircle2, Award, Printer, Download, ArrowUpRight } from 'lucide-react'
+import { FileText, Sparkles, Calendar, CheckCircle2, Award, Printer, Download, ArrowUpRight, ShieldAlert, BarChart3, TrendingUp } from 'lucide-react'
 import Badge from '../../components/Badge.jsx'
 import Button from '../../components/Button.jsx'
 
@@ -20,7 +20,7 @@ function ReportPreview({ report }) {
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-3d-subtle p-8 space-y-6 select-none animate-fadeIn">
+    <div id="printable-report" className="bg-white rounded-2xl border border-slate-200/80 shadow-3d-subtle p-8 space-y-6 select-none animate-fadeIn">
       {/* Official Report Header Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-6">
         <div className="flex items-center gap-3.5">
@@ -29,34 +29,34 @@ function ReportPreview({ report }) {
           </div>
           <div>
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-600">
-              <Sparkles size={12} /> Executive Research Report
+              <Sparkles size={12} /> Executive Financial Research Report
             </div>
             <h2 className="text-xl font-extrabold text-slate-900 tracking-tight mt-0.5">
               {report.title || 'Financial Disclosures Analysis'}
             </h2>
             {report.generated_at && (
               <p className="text-xs font-semibold text-slate-400 mt-1 flex items-center gap-1.5">
-                <Calendar size={13} /> Generated on {report.generated_at}
+                <Calendar size={13} /> Generated on {report.generated_at} · Prepared by Charitha (Financial Analyst)
               </p>
             )}
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 no-print">
           <Badge variant="success">Verified Analysis</Badge>
           <Button onClick={handlePrint} icon={Printer} variant="outline" size="sm">
-            Print PDF Report
+            Print Clean Report
           </Button>
         </div>
       </div>
 
-      {/* Quick Section Navigation Bar */}
+      {/* Quick Section Navigation Bar (Hidden in Print) */}
       {report.sections && report.sections.length > 0 && (
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-100">
+        <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-100 no-print">
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-shrink-0">Jump To:</span>
           <button
             onClick={() => setActiveSection(0)}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex-shrink-0 ${
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex-shrink-0 cursor-pointer ${
               activeSection === 0 ? 'bg-blue-50 text-blue-600 border border-blue-200' : 'text-slate-500 hover:text-slate-800'
             }`}
           >
@@ -66,7 +66,7 @@ function ReportPreview({ report }) {
             <button
               key={idx}
               onClick={() => setActiveSection(idx + 1)}
-              className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex-shrink-0 ${
+              className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex-shrink-0 cursor-pointer ${
                 activeSection === idx + 1 ? 'bg-blue-50 text-blue-600 border border-blue-200' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
@@ -99,7 +99,7 @@ function ReportPreview({ report }) {
                 </span>
                 {section.heading}
               </h3>
-              <p className="text-sm font-medium text-slate-600 leading-relaxed whitespace-pre-wrap pl-8">
+              <p className="text-xs font-medium text-slate-600 leading-relaxed pl-8">
                 {section.content}
               </p>
             </div>
@@ -107,17 +107,17 @@ function ReportPreview({ report }) {
         </div>
       )}
 
-      {/* Report Footer Verification Note */}
-      <div className="pt-6 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400 font-semibold">
-        <span className="flex items-center gap-1">
-          <CheckCircle2 size={14} className="text-emerald-500" /> Multi-Agent AI System • Verified Disclosures
-        </span>
-        <span>Confidential Executive Analysis</span>
+      {/* Disclaimer Footer */}
+      <div className="pt-6 border-t border-slate-200 text-center space-y-1">
+        <p className="text-[11px] font-semibold text-slate-400">
+          Strict Grounding Disclaimer: All financial data, ratios, and risk flags extracted directly from verified company disclosures.
+        </p>
+        <p className="text-[10px] text-slate-400">
+          Generated via Multi-Agent Financial Research System · Automated Research Engine
+        </p>
       </div>
     </div>
   )
 }
 
 export default ReportPreview
-
-

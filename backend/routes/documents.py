@@ -1,5 +1,5 @@
 from typing import Optional
-
+from utils.security import get_current_user
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 
 from schemas.document_schema import LinkCompanyRequest

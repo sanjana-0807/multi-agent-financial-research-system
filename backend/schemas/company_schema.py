@@ -4,6 +4,7 @@ from datetime import datetime
 
 
 class CompanyCreate(BaseModel):
+    workspace_id: str = Field(..., description="Mongo _id of the owning Workspace")
     name: str = Field(..., min_length=1, max_length=200)
     ticker: str = Field(..., min_length=1, max_length=10)
     industry: Optional[str] = None
@@ -18,6 +19,7 @@ class CompanyUpdate(BaseModel):
 
 class CompanyResponse(BaseModel):
     id: str
+    workspace_id: str
     name: str
     ticker: str
     industry: Optional[str] = None
