@@ -1,7 +1,26 @@
 @"
+# Environment
+.env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+
+# ChromaDB generated data
 chroma_storage/
 chroma_test_storage/
-.env
+vectorstore/chroma_data/
+**/chroma_data/
+
+# Local test documents
+data/*.pdf
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
 "@ | Set-Content .gitignore

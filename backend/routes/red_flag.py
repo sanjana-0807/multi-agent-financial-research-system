@@ -1,8 +1,8 @@
 # routes/red_flag.py
 from fastapi import APIRouter, Depends
 
-from schemas.red_flag_schema import RedFlagResponse, RedFlagRequest
-from services import red_flag_service
+from backend.schemas.red_flag_schema import RedFlagResponse, RedFlagRequest
+from backend.services import red_flag_service
 from core.dependencies import get_current_user
 
 router = APIRouter(prefix="/red-flags", tags=["Red Flags"])

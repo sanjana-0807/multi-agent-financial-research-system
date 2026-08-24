@@ -1,4 +1,5 @@
-from agent.extraction_agent import ExtractionAgent
+from backend.agents.extraction_agent.document_fetcher import fetch_document_text
+from backend.agents.extraction_agent.tasks import run_extraction
 
 from models.extracted_metric import ExtractedMetric
 from models.red_flag import RedFlag
@@ -13,75 +14,171 @@ class ResearchService:
     @staticmethod
     async def extract(document_id: str):
 
-        # Get financial data from Extraction Agent
-        result = ExtractionAgent.extract_financial_metrics(document_id)
+        # -----------------------------------------------------
+        # Fetch document text
+        # -----------------------------------------------------
 
-        # Check whether metrics already exist
-        existing_metric = await ExtractedMetric.find_one(
-            ExtractedMetric.document_id == document_id
+        document_text = fetch_document_text(document_id)
+
+        if not document_text:
+            return {
+                "message": "Document text not found",
+                "data": {
+                    "document_id": document_id
+                }
+            }
+
+        # -----------------------------------------------------
+        # Run extraction agent
+        # -----------------------------------------------------
+
+        result = run_extraction(
+            document_text,
+            document_id
         )
 
         # -----------------------------------------------------
-        # UPDATE EXISTING METRIC
+        # Check whether metrics already exist
         # -----------------------------------------------------
+
+        existing_metric = await ExtractedMetric.find_one(
+            {"document_id": document_id}
+        )
+
+        # =====================================================
+        # GET EXTRACTED VALUES
+        # =====================================================
+
+        company = result.get("company")
+        fiscal_year = result.get("fiscal_year")
+        revenue = result.get("revenue")
+        net_profit = result.get("net_profit")
+        assets = result.get("assets")
+        liabilities = result.get("liabilities")
+        cash_flow = result.get("cash_flow")
+        eps = result.get("eps")
+
+        # =====================================================
+        # CALCULATE RATIOS
+        # =====================================================
+
+        # -----------------------------------------------------
+        # Current Ratio
+        #
+        # If run_extraction already provides it, use it.
+        # Otherwise use 0.0 so the Pydantic model receives
+        # a valid number instead of None.
+        # -----------------------------------------------------
+
+        current_ratio = result.get("current_ratio")
+
+        if current_ratio is None:
+            current_ratio = 0.0
+
+        # -----------------------------------------------------
+        # Debt to Equity
+        # -----------------------------------------------------
+
+        debt_to_equity = result.get("debt_to_equity")
+
+        if debt_to_equity is None:
+
+            if (
+                assets is not None
+                and liabilities is not None
+            ):
+
+                equity = assets - liabilities
+
+                if equity != 0:
+                    debt_to_equity = liabilities / equity
+
+        if debt_to_equity is None:
+            debt_to_equity = 0.0
+
+        # -----------------------------------------------------
+        # Net Profit Margin
+        # -----------------------------------------------------
+
+        net_profit_margin = result.get(
+            "net_profit_margin"
+        )
+
+        if (
+            net_profit_margin is None
+            and revenue is not None
+            and revenue != 0
+            and net_profit is not None
+        ):
+            net_profit_margin = (
+                net_profit / revenue
+            ) * 100
+
+        if net_profit_margin is None:
+            net_profit_margin = 0.0
+
+        # =====================================================
+        # UPDATE EXISTING METRIC
+        # =====================================================
 
         if existing_metric:
 
-            existing_metric.company = result.get("company")
-            existing_metric.fiscal_year = result.get("fiscal_year")
-            existing_metric.revenue = result.get("revenue")
-            existing_metric.net_profit = result.get("net_profit")
-            existing_metric.assets = result.get("assets")
-            existing_metric.liabilities = result.get("liabilities")
-            existing_metric.cash_flow = result.get("cash_flow")
-            existing_metric.eps = result.get("eps")
+            existing_metric.company = company
+            existing_metric.fiscal_year = fiscal_year
+            existing_metric.revenue = revenue
+            existing_metric.net_profit = net_profit
+            existing_metric.assets = assets
+            existing_metric.liabilities = liabilities
+            existing_metric.cash_flow = cash_flow
+            existing_metric.eps = eps
 
-            # Calculate net profit margin
-            revenue = result.get("revenue")
-            net_profit = result.get("net_profit")
-
-            if revenue and revenue != 0 and net_profit is not None:
-                existing_metric.ratios["net_profit_margin"] = (
-                    net_profit / revenue
-                ) * 100
+            existing_metric.ratios = {
+                "current_ratio": float(current_ratio),
+                "debt_to_equity": float(debt_to_equity),
+                "net_profit_margin": float(net_profit_margin)
+            }
 
             await existing_metric.save()
 
             return {
                 "message": "Financial metrics updated successfully",
-                "data": result
+                "data": {
+                    "document_id": document_id,
+                    "company": company,
+                    "fiscal_year": fiscal_year,
+                    "revenue": revenue,
+                    "net_profit": net_profit,
+                    "assets": assets,
+                    "liabilities": liabilities,
+                    "cash_flow": cash_flow,
+                    "eps": eps,
+                    "ratios": {
+                        "current_ratio": float(current_ratio),
+                        "debt_to_equity": float(debt_to_equity),
+                        "net_profit_margin": float(net_profit_margin)
+                    }
+                }
             }
 
-        # -----------------------------------------------------
+        # =====================================================
         # CREATE NEW METRIC
-        # -----------------------------------------------------
-
-        revenue = result.get("revenue")
-        net_profit = result.get("net_profit")
-
-        net_profit_margin = 0.0
-
-        if revenue and revenue != 0 and net_profit is not None:
-            net_profit_margin = (
-                net_profit / revenue
-            ) * 100
+        # =====================================================
 
         metric = ExtractedMetric(
             metric_id=f"M_{document_id}",
             document_id=document_id,
-            company=result.get("company"),
-            fiscal_year=result.get("fiscal_year"),
+            company=company,
+            fiscal_year=fiscal_year,
             revenue=revenue,
             net_profit=net_profit,
-            assets=result.get("assets"),
-            liabilities=result.get("liabilities"),
-            cash_flow=result.get("cash_flow"),
-            eps=result.get("eps"),
-
+            assets=assets,
+            liabilities=liabilities,
+            cash_flow=cash_flow,
+            eps=eps,
             ratios={
-                "current_ratio": 0.0,
-                "debt_to_equity": 0.0,
-                "net_profit_margin": net_profit_margin
+                "current_ratio": float(current_ratio),
+                "debt_to_equity": float(debt_to_equity),
+                "net_profit_margin": float(net_profit_margin)
             }
         )
 
@@ -89,9 +186,23 @@ class ResearchService:
 
         return {
             "message": "Financial metrics extracted successfully",
-            "data": result
+            "data": {
+                "document_id": document_id,
+                "company": company,
+                "fiscal_year": fiscal_year,
+                "revenue": revenue,
+                "net_profit": net_profit,
+                "assets": assets,
+                "liabilities": liabilities,
+                "cash_flow": cash_flow,
+                "eps": eps,
+                "ratios": {
+                    "current_ratio": float(current_ratio),
+                    "debt_to_equity": float(debt_to_equity),
+                    "net_profit_margin": float(net_profit_margin)
+                }
+            }
         }
-
 
     # =========================================================
     # RED FLAGS
@@ -100,18 +211,17 @@ class ResearchService:
     @staticmethod
     async def red_flags(document_id: str):
 
-        # Find existing red flag record
-        existing_flag = await RedFlag.find_one(
-            RedFlag.document_id == document_id
-        )
-
         # -----------------------------------------------------
         # Get financial metrics
         # -----------------------------------------------------
 
         metric = await ExtractedMetric.find_one(
-            ExtractedMetric.document_id == document_id
+            {"document_id": document_id}
         )
+
+        # -----------------------------------------------------
+        # Metrics not available
+        # -----------------------------------------------------
 
         if metric is None:
 
@@ -123,6 +233,10 @@ class ResearchService:
                     "Financial metrics have not been extracted yet."
                 ]
             }
+
+        # =====================================================
+        # RED FLAG ANALYSIS
+        # =====================================================
 
         red_flags = []
         risk_level = "Low"
@@ -139,98 +253,109 @@ class ResearchService:
 
             liability_ratio = (
                 metric.liabilities / metric.assets
-            ) * 100
+            )
 
-            if liability_ratio > 80:
+            if liability_ratio > 0.8:
 
                 red_flags.append(
-                    "Liabilities are high compared with total assets."
+                    "High liabilities compared with total assets."
                 )
 
                 risk_level = "High"
 
-            elif liability_ratio > 50:
+            elif liability_ratio > 0.5:
 
                 red_flags.append(
-                    "Liabilities are moderately high compared with total assets."
+                    "Moderate liabilities compared with total assets."
                 )
 
-                risk_level = "Medium"
-
+                if risk_level == "Low":
+                    risk_level = "Medium"
 
         # -----------------------------------------------------
         # Check net profit
         # -----------------------------------------------------
 
-        if (
-            metric.net_profit is not None
-            and metric.net_profit < 0
-        ):
+        if metric.net_profit is not None:
 
-            red_flags.append(
-                "Company reported a negative net profit."
-            )
+            if metric.net_profit < 0:
 
-            risk_level = "High"
+                red_flags.append(
+                    "Company reported a net loss."
+                )
 
+                risk_level = "High"
 
         # -----------------------------------------------------
         # Check revenue
         # -----------------------------------------------------
 
-        if metric.revenue is None:
+        if metric.revenue is not None:
 
-            red_flags.append(
-                "Revenue information is missing."
-            )
+            if metric.revenue <= 0:
 
-            if risk_level == "Low":
-                risk_level = "Medium"
+                red_flags.append(
+                    "Revenue is zero or negative."
+                )
 
+                risk_level = "High"
 
         # -----------------------------------------------------
-        # No problems detected
+        # Check cash flow
+        # -----------------------------------------------------
+
+        if metric.cash_flow is not None:
+
+            if metric.cash_flow < 0:
+
+                red_flags.append(
+                    "Negative cash flow detected."
+                )
+
+                if risk_level == "Low":
+                    risk_level = "Medium"
+
+        # -----------------------------------------------------
+        # Check EPS
+        # -----------------------------------------------------
+
+        if metric.eps is not None:
+
+            if metric.eps < 0:
+
+                red_flags.append(
+                    "Negative earnings per share detected."
+                )
+
+                if risk_level == "Low":
+                    risk_level = "Medium"
+
+        # -----------------------------------------------------
+        # No red flags
         # -----------------------------------------------------
 
         if not red_flags:
 
             red_flags.append(
-                "No significant accounting anomalies detected."
+                "No major financial red flags detected."
             )
 
-
-        # -----------------------------------------------------
-        # SAVE / UPDATE RED FLAGS
-        # -----------------------------------------------------
-
-        if existing_flag:
-
-            existing_flag.company = metric.company
-            existing_flag.risk_level = risk_level
-            existing_flag.red_flags = red_flags
-
-            await existing_flag.save()
-
-        else:
-
-            flag = RedFlag(
-                flag_id=f"RF_{document_id}",
-                document_id=document_id,
-                company=metric.company,
-                risk_level=risk_level,
-                red_flags=red_flags
-            )
-
-            await flag.insert()
-
-
-        # -----------------------------------------------------
+        # =====================================================
         # RETURN RESULT
-        # -----------------------------------------------------
+        # =====================================================
 
         return {
             "document_id": document_id,
             "company": metric.company,
             "risk_level": risk_level,
-            "red_flags": red_flags
+            "red_flags": red_flags,
+            "metrics": {
+                "revenue": metric.revenue,
+                "net_profit": metric.net_profit,
+                "assets": metric.assets,
+                "liabilities": metric.liabilities,
+                "cash_flow": metric.cash_flow,
+                "eps": metric.eps,
+                "ratios": metric.ratios
+            }
         }

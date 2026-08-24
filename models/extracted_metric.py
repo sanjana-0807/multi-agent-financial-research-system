@@ -6,8 +6,15 @@ from pydantic import Field
 
 class ExtractedMetric(Document):
 
-    metric_id: str = Field(..., description="Unique metric ID")
-    document_id: str = Field(..., description="Source document ID")
+    metric_id: str = Field(
+        ...,
+        description="Unique metric ID"
+    )
+
+    document_id: str = Field(
+        ...,
+        description="Source document ID"
+    )
 
     company: Optional[str] = None
     fiscal_year: Optional[int] = None
@@ -19,7 +26,9 @@ class ExtractedMetric(Document):
     cash_flow: Optional[float] = None
     eps: Optional[float] = None
 
-    ratios: Dict[str, float] = Field(default_factory=dict)
+    ratios: Dict[str, Optional[float]] = Field(
+        default_factory=dict
+    )
 
     class Settings:
         name = "extracted_metrices"

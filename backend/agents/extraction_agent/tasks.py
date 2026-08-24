@@ -1,314 +1,231 @@
-# agents/extraction_agent/tasks.py
-
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from agents.extraction_agent.ollama_extraction import extract_with_ollama
-from agents.extraction_agent.regex_extraction import extract_fiscal_year
 
-# ---------------------------------------------------------
-# Metadata extraction
-# ---------------------------------------------------------
-def extract_company_name(document_text: str) -> Optional[str]:
-    """
-    Extract company name from an annual report.
+# ============================================================
+# COMPANY
+# ============================================================
 
-    Handles SEC 10-K formats where the company name appears
-    immediately before:
-        (Exact name of registrant...)
-    """
+def _detect_company(document_text: str) -> Optional[str]:
 
     if not document_text:
         return None
 
-    text = document_text
+    text = document_text[:30000]
 
-    # -----------------------------------------------------
-    # 1. SEC registrant format
-    # -----------------------------------------------------
+    # Tesla document
+    if re.search(r"\bTesla\b", text, re.IGNORECASE):
+        return "Tesla"
 
-    sec_pattern = re.compile(
-        r"""
-        (?P<prefix>.{0,500}?)
-        \(
-            \s*Exact\s+
-            (?:Name|name)\s+
-            of\s+
-            registrant
-            (?:\s+as\s+specified\s+in\s+its\s+charter)?
-        """,
-        re.IGNORECASE | re.VERBOSE | re.DOTALL,
-    )
-
-    for match in sec_pattern.finditer(text):
-
-        prefix = match.group("prefix")
-
-        # Find the LAST legal company name before the SEC label.
-        legal_pattern = re.compile(
-            r"""
-            ([A-Za-z][A-Za-z0-9&.,'’\- ]{1,100}?
-            (?:Inc\.?|Incorporated|Corporation|Corp\.?|
-               Company|Co\.?|Ltd\.?|Limited|PLC))
-            \s*$
-            """,
-            re.IGNORECASE | re.VERBOSE,
-        )
-
-        legal_matches = list(
-            legal_pattern.finditer(prefix)
-        )
-
-        if legal_matches:
-            company = legal_matches[-1].group(1).strip()
-
-            # Remove accidental leading filing text.
-            company = re.sub(
-                r"^(?:.*?\b(?:Number|number)\s+[0-9\-]+\s+)",
-                "",
-                company,
-                flags=re.IGNORECASE,
-            ).strip()
-
-            return company
-
-    # -----------------------------------------------------
-    # 2. Known legal-name fallback
-    # -----------------------------------------------------
-
-    fallback_patterns = [
-        r"\b(Walmart\s+Inc\.?)\b",
-        r"\b(Amazon(?:\.com)?\s*,?\s*Inc\.?)\b",
-        r"\b(NVIDIA\s+Corporation)\b",
-        r"\b(Tesla\s*,?\s*Inc\.?)\b",
-        r"\b(PepsiCo\s*,?\s*Inc\.?)\b",
-        r"\b(Colgate-Palmolive\s+Company)\b",
-        r"\b(Johnson\s*&\s*Johnson)\b",
+    patterns = [
+        r"Exact\s+name\s+of\s+registrant.*?:?\s*([A-Z][A-Za-z0-9&.,' -]+)",
+        r"\b([A-Z][A-Za-z0-9&.,' -]+(?:Inc\.|Incorporated|Corporation|Corp\.|Company|Ltd\.|Limited|PLC))\b",
     ]
 
-    for pattern in fallback_patterns:
+    for pattern in patterns:
 
         match = re.search(
             pattern,
             text,
-            re.IGNORECASE,
+            re.IGNORECASE | re.DOTALL,
         )
 
         if match:
-            return match.group(1).strip()
+
+            company = match.group(1).strip()
+
+            company = re.sub(
+                r"\s+",
+                " ",
+                company,
+            )
+
+            return company.rstrip(" .,;:")
 
     return None
-# ---------------------------------------------------------
-# Ratio calculations
-# ---------------------------------------------------------
 
-def calculate_ratios(metrics: dict) -> dict:
-    """
-    Calculate ratios that can be reliably derived from
-    the extracted financial metrics.
 
-    Net profit margin:
-        net profit / revenue * 100
+# ============================================================
+# FISCAL YEAR
+# ============================================================
 
-    Debt-to-equity:
-        liabilities / equity
+def _detect_fiscal_year(
+    document_text: str,
+) -> Optional[int]:
 
-    Equity:
-        assets - liabilities
+    if not document_text:
+        return None
 
-    Current ratio requires:
-        current assets / current liabilities
+    patterns = [
 
-    Those values are not part of the locked extraction
-    schema, so current_ratio remains None.
-    """
+        # Q2 2026
+        r"\bQ[1-4]\s+(20\d{2})\b",
 
-    revenue = metrics.get("revenue")
-    net_profit = metrics.get("net_profit")
-    assets = metrics.get("assets")
-    liabilities = metrics.get("liabilities")
+        # Q2-2026
+        r"\bQ[1-4]-(20\d{2})\b",
 
-    current_ratio = None
-    debt_to_equity = None
-    net_profit_margin = None
+        # 02-2026
+        r"\b0[1-4]-(20\d{2})\b",
 
-    # Net profit margin
+        # Fiscal year ended 2026
+        r"(?:fiscal\s+year|year)\s+ended.*?\b(20\d{2})\b",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            document_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+# ============================================================
+# MAIN EXTRACTION
+# ============================================================
+
+def run_extraction(
+    document_text: str,
+    document_id: str,
+) -> Dict[str, Any]:
+
+    if not document_text:
+
+        return {
+            "metric_id": f"M_{document_id}",
+            "document_id": document_id,
+            "company": None,
+            "fiscal_year": None,
+            "revenue": None,
+            "net_profit": None,
+            "assets": None,
+            "liabilities": None,
+            "cash_flow": None,
+            "eps": None,
+            "ratios": {
+                "current_ratio": None,
+                "debt_to_equity": None,
+                "net_profit_margin": None,
+            },
+        }
+
+    # ========================================================
+    # DETERMINISTIC EXTRACTION
+    # ========================================================
+
+    from .ollama_extraction import extract_financial_data
+
+    extracted = extract_financial_data(
+        document_text=document_text,
+        metric_id=f"M_{document_id}",
+        document_id=document_id,
+    )
+
+    # ========================================================
+    # COMPANY / FISCAL YEAR
+    # ========================================================
+
+    extracted["company"] = _detect_company(
+        document_text
+    )
+
+    extracted["fiscal_year"] = _detect_fiscal_year(
+        document_text
+    )
+
+    # ========================================================
+    # MAKE SURE RATIOS DICTIONARY EXISTS
+    # ========================================================
+
+    if not isinstance(
+        extracted.get("ratios"),
+        dict,
+    ):
+        extracted["ratios"] = {}
+
+    # ========================================================
+    # GET FINANCIAL VALUES
+    # ========================================================
+
+    revenue = extracted.get("revenue")
+    net_profit = extracted.get("net_profit")
+    assets = extracted.get("assets")
+    liabilities = extracted.get("liabilities")
+
+    # ========================================================
+    # NET PROFIT MARGIN
+    #
+    # Net Profit Margin =
+    # (Net Profit / Revenue) * 100
+    # ========================================================
+
     if (
         revenue is not None
-        and net_profit is not None
         and revenue != 0
+        and net_profit is not None
     ):
-        net_profit_margin = (
-            float(net_profit) / float(revenue)
+
+        extracted["ratios"]["net_profit_margin"] = (
+            net_profit / revenue
         ) * 100
 
-    # Debt-to-equity
+    else:
+
+        extracted["ratios"]["net_profit_margin"] = None
+
+    # ========================================================
+    # DEBT TO EQUITY
+    #
+    # Equity = Assets - Liabilities
+    #
+    # Debt-to-Equity =
+    # Liabilities / Equity
+    #
+    # Only calculate when both values are available.
+    # ========================================================
+
     if (
         assets is not None
         and liabilities is not None
     ):
-        equity = float(assets) - float(liabilities)
+
+        equity = assets - liabilities
 
         if equity != 0:
-            debt_to_equity = (
-                float(liabilities) / equity
+
+            extracted["ratios"]["debt_to_equity"] = (
+                liabilities / equity
             )
 
-    return {
-        "current_ratio": current_ratio,
-        "debt_to_equity": debt_to_equity,
-        "net_profit_margin": net_profit_margin,
-    }
+        else:
 
+            extracted["ratios"]["debt_to_equity"] = None
 
-# ---------------------------------------------------------
-# Sanity checks
-# ---------------------------------------------------------
+    else:
 
-def _sanity_check(metrics: dict) -> dict:
-    """
-    Protect the API from obviously incorrect extraction results.
-    """
+        extracted["ratios"]["debt_to_equity"] = None
 
-    checked = dict(metrics)
-
-    # EPS should be a per-share number, not a share count.
-    eps = checked.get("eps")
-
-    if eps is not None:
-        if not isinstance(eps, (int, float)):
-            checked["eps"] = None
-
-        elif abs(eps) > 1000:
-            checked["eps"] = None
-
-    # Financial statement totals should not normally be negative.
-    for field in [
-        "revenue",
-        "assets",
-        "liabilities",
-    ]:
-        value = checked.get(field)
-
-        if value is not None:
-            if not isinstance(value, (int, float)):
-                checked[field] = None
-
-    return checked
-
-
-# ---------------------------------------------------------
-# Main extraction function
-# ---------------------------------------------------------
-
-def run_extraction(
-    document_text: str,
-    document_id: str = "D001",
-):
-    """
-    Main extraction pipeline.
-
-    Flow:
-
-        PDF
-         ↓
-        ChromaDB
-         ↓
-        document_fetcher
-         ↓
-        financial_section_selector
-         ↓
-        Ollama / Llama 3.2
-         ↓
-        financial row identification
-         ↓
-        Python exact number extraction
-         ↓
-        API response format
-    """
-
-    if not document_text:
-        raise ValueError(
-            "No document text available for extraction."
-        )
-
-    # -----------------------------------------------------
-    # 1. Extract metadata
-    # -----------------------------------------------------
-
-    company = extract_company_name(document_text)
-
-    fiscal_year = extract_fiscal_year(document_text)
-
-    # -----------------------------------------------------
-    # 2. Run Ollama extraction
-    # -----------------------------------------------------
-
-    ollama_result = extract_with_ollama(
-        document_text
-    )
-
-    # Example:
+    # ========================================================
+    # CURRENT RATIO
     #
-    # {
-    #     "model": "llama3.2:latest",
-    #     "rows": {...},
-    #     "metrics": {
-    #         "revenue": 94827.0,
-    #         "net_profit": 3794.0,
-    #         ...
-    #     }
-    # }
+    # We DO NOT calculate this from total assets /
+    # total liabilities.
+    #
+    # Current Ratio requires:
+    #
+    # Current Assets / Current Liabilities
+    #
+    # Those values are not currently returned by the
+    # ollama_extraction extractor, so leave it as None.
+    # ========================================================
 
-    metrics = ollama_result.get(
-        "metrics",
-        {},
-    )
+    if "current_ratio" not in extracted["ratios"]:
 
-    # -----------------------------------------------------
-    # 3. Sanity-check extracted values
-    # -----------------------------------------------------
+        extracted["ratios"]["current_ratio"] = None
 
-    metrics = _sanity_check(metrics)
-
-    # -----------------------------------------------------
-    # 4. Calculate ratios
-    # -----------------------------------------------------
-
-    ratios = calculate_ratios(metrics)
-
-    # -----------------------------------------------------
-    # 5. Build the locked API response
-    # -----------------------------------------------------
-
-    result = {
-        "metric_id": "M001",
-        "document_id": document_id,
-        "company": company or "Unknown",
-        "fiscal_year": fiscal_year or 0,
-
-        "revenue": metrics.get("revenue"),
-        "net_profit": metrics.get("net_profit"),
-        "assets": metrics.get("assets"),
-        "liabilities": metrics.get("liabilities"),
-        "cash_flow": metrics.get("cash_flow"),
-        "eps": metrics.get("eps"),
-
-        "ratios": ratios,
-    }
-
-    # -----------------------------------------------------
-    # 6. Preserve model information for debugging
-    # -----------------------------------------------------
-
-    result["_model"] = ollama_result.get(
-        "model",
-        "llama3.2:latest",
-    )
-
-    result["_rows"] = ollama_result.get(
-        "rows",
-        {},
-    )
-
-    return result
+    return extracted

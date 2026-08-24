@@ -9,7 +9,7 @@ side for context. This keeps the LLM call fast and scoped -- the model
 only ever sees text actually retrieved from the document, never
 numbers it has to interpret itself.
 """
-from vectorstore.chroma_client import collection
+from backend.vectorstore.chroma_client import collection
 
 AUDITOR_KEYWORDS = [
     "auditor", "audit opinion", "independent registered public accounting",
