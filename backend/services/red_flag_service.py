@@ -25,6 +25,37 @@ from agents.red_flag_agent.document_context import fetch_auditor_context
 from agents.red_flag_agent.crew import run_auditor_classification
 
 logger = logging.getLogger(__name__)
+def _normalize_page_number(value):
+    """The LLM occasionally returns a list (e.g. [38]) instead of a
+    single int when a finding cites multiple pages, even though the
+    prompt asks for <integer or null>. Take the first element in that
+    case; fall back to None for anything else unparseable so a single
+    malformed field never crashes the whole red-flag run."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list) and value:
+        first = value[0]
+        return first if isinstance(first, int) else None
+    return None
+def _normalize_severity(value: str) -> str:
+    """Layer 2 (LLM) sometimes returns free-text severities like
+    'SUBSTANTIAL DOUBT' or 'No Qualified Opinion' instead of the
+    requested HIGH/MEDIUM/LOW enum. Map the common cases so
+    compute_overall_risk() can still see these findings; default to
+    MEDIUM for anything unrecognized so a real issue is never silently
+    treated as LOW."""
+    if not value:
+        return "MEDIUM"
+    v = value.strip().upper()
+    if v in ("HIGH", "MEDIUM", "LOW"):
+        return v
+    if "SUBSTANTIAL DOUBT" in v or "ADVERSE" in v or "QUALIFIED" in v and "NO" not in v:
+        return "HIGH"
+    if v.startswith("NO ") or "NO MATERIAL" in v or "NO QUALIFIED" in v:
+        return "LOW"
+    return "MEDIUM"
 
 def _to_response(result: RedFlagResult) -> RedFlagResponse:
     data = result.model_dump()
@@ -53,11 +84,11 @@ async def run_red_flag_analysis(document_id: str) -> RedFlagResponse:
                 raw_flags.append({
                     "category": "auditor_remarks",
                     "title": f.get("title", "Auditor Remark"),
-                    "severity": f.get("severity", "MEDIUM"),
+                    "severity": _normalize_severity(f.get("severity", "MEDIUM")),
                     "explanation": f.get("explanation", ""),
                     "evidence": f.get("evidence", ""),
                     "source_metric_id": None,
-                    "page_number": f.get("page_number"),
+                    "page_number": _normalize_page_number(f.get("page_number")),
                 })
     except Exception:
         logger.exception(

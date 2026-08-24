@@ -10,6 +10,7 @@ from models.company import Company
 from models.comparison_result import ComparisonResult
 from models.document import DocumentModel
 from models.red_flag import RedFlagResult
+from models.workspace import Workspace
 
 client: AsyncIOMotorClient | None = None
 
@@ -36,5 +37,6 @@ async def init_db():
             ComparisonResult,
             DocumentModel,
             RedFlagResult,
+            Workspace,
         ],
     )
