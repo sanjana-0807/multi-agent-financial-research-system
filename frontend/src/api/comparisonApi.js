@@ -1,9 +1,7 @@
 import axiosClient from './axiosClient.js'
 
-// Matches backend/routes/comparison.py
-
-export function runComparison(companyIds) {
-  return axiosClient.post('/comparison/run', { company_ids: companyIds })
+export function runComparison(workspaceId, companyIds) {
+  return axiosClient.post('/comparison/run', { workspace_id: workspaceId, company_ids: companyIds })
 }
 
 export function getComparison(comparisonId) {
@@ -11,9 +9,5 @@ export function getComparison(comparisonId) {
 }
 
 export function listComparisons(skip = 0, limit = 50) {
-  return axiosClient.get(`/comparison/?skip=${skip}&limit=${limit}`)  // was missing trailing slash
+  return axiosClient.get(`/comparison/?skip=${skip}&limit=${limit}`)
 }
-
-// Backward compatibility alias
-export const compareCompanies = runComparison
-export const getComparisonResult = getComparison
