@@ -1,81 +1,45 @@
-from typing import List
-
-from dotenv import load_dotenv
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
-
-load_dotenv()
+from vectorstore.chroma_client import collection
 
 
-class FinancialRetriever:
+def retrieve_relevant_chunks(
+    question: str,
+    document_id: str,
+    top_k: int = 5,
+):
     """
-    Retriever for financial documents stored in ChromaDB.
+    Retrieve the most relevant chunks for a user question
+    from the existing financial document collection.
     """
 
-    def __init__(
-        self,
-        persist_directory: str = "vectorstore",
-        collection_name: str = "financial_documents",
+    results = collection.query(
+        query_texts=[question],
+        n_results=top_k,
+        where={
+            "document_id": document_id
+        },
+    )
+
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+
+    retrieved_chunks = []
+
+    for document, metadata, distance in zip(
+        documents,
+        metadatas,
+        distances,
     ):
-        self.persist_directory = persist_directory
-        self.collection_name = collection_name
-
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        retrieved_chunks.append(
+            {
+                "text": document,
+                "document_id": metadata.get("document_id"),
+                "filename": metadata.get("filename"),
+                "page": metadata.get("page"),
+                "chunk_index": metadata.get("chunk_index"),
+                "source": metadata.get("source"),
+                "distance": distance,
+            }
         )
 
-        self.vectorstore = Chroma(
-            collection_name=self.collection_name,
-            persist_directory=self.persist_directory,
-            embedding_function=self.embeddings,
-        )
-
-    def add_documents(
-        self,
-        documents: List[Document],
-    ):
-        """
-        Add documents to Chroma.
-        """
-
-        if not documents:
-            return 0
-
-        self.vectorstore.add_documents(documents)
-
-        return len(documents)
-
-    def search(
-        self,
-        query: str,
-        k: int = 5,
-    ) -> List[Document]:
-        """
-        Retrieve the most relevant document chunks.
-        """
-
-        if not query or not query.strip():
-            return []
-
-        return self.vectorstore.similarity_search(
-            query,
-            k=k,
-        )
-
-    def search_with_scores(
-        self,
-        query: str,
-        k: int = 5,
-    ):
-        """
-        Retrieve documents with similarity scores.
-        """
-
-        if not query or not query.strip():
-            return []
-
-        return self.vectorstore.similarity_search_with_score(
-            query,
-            k=k,
-        )
+    return retrieved_chunks

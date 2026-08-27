@@ -1,84 +1,63 @@
-from agents.research_agent.research import FinancialResearcher
+from typing import Dict
+
+from .retriever import retrieve_relevant_chunks
+from .response_generator import generate_research_response
+from .agent import llm
 
 
-researcher = FinancialResearcher()
-
-
-def answer_question(question: str, k: int = 5):
+def answer_research_question(
+    question: str,
+    document_id: str,
+    top_k: int = 5,
+) -> Dict:
     """
-    Retrieve relevant document chunks and generate a simple
-    deterministic financial answer without requiring an LLM.
+    Run the complete Research Agent pipeline.
     """
 
     if not question or not question.strip():
         return {
             "question": question,
-            "answer": "Please provide a question.",
-            "sources": [],
+            "answer": "Please provide a research question.",
+            "evidence": None,
+            "citations": [],
+            "retrieved_chunks": [],
         }
 
-    results = researcher.research(
-        question=question,
-        k=k,
-    )
-
-    if not results:
+    if not document_id or not document_id.strip():
         return {
             "question": question,
-            "answer": "No relevant information was found in the documents.",
-            "sources": [],
+            "answer": "A document ID is required.",
+            "evidence": None,
+            "citations": [],
+            "retrieved_chunks": [],
         }
 
-    sources = []
+    try:
+        top_k = int(top_k)
+    except (ValueError, TypeError):
+        top_k = 5
 
-    for result in results:
-        metadata = result.get("metadata", {})
+    if top_k <= 0:
+        top_k = 5
 
-        sources.append(
-            {
-                "document_id": metadata.get("document_id"),
-                "source": metadata.get("source"),
-                "page": metadata.get("page"),
-            }
-        )
+    # -----------------------------------------------------
+    # STEP 1: RETRIEVE
+    # -----------------------------------------------------
 
-    # -----------------------------------------
-    # Simple financial extraction
-    # -----------------------------------------
+    retrieved_chunks = retrieve_relevant_chunks(
+        question=question,
+        document_id=document_id,
+        top_k=top_k,
+    )
 
-    question_lower = question.lower()
+    # -----------------------------------------------------
+    # STEP 2: GENERATE ANSWER
+    # -----------------------------------------------------
 
-    if "revenue" in question_lower:
-        for result in results:
-            content = result.get("content", "")
+    response = generate_research_response(
+        question=question,
+        retrieved_chunks=retrieved_chunks,
+        llm=llm,
+    )
 
-            for line in content.splitlines():
-                if "revenue:" in line.lower():
-                    revenue = line.split(":", 1)[1].strip()
-
-                    metadata = result.get("metadata", {})
-
-                    answer = (
-                        f"The company's revenue in 2025 was {revenue}. "
-                        f"Source: {metadata.get('source')}, "
-                        f"page {metadata.get('page')}."
-                    )
-
-                    return {
-                        "question": question,
-                        "answer": answer,
-                        "sources": sources,
-                    }
-
-    # -----------------------------------------
-    # Fallback
-    # -----------------------------------------
-
-    return {
-        "question": question,
-        "answer": (
-            "The retrieved documents contain relevant information, "
-            "but a concise answer could not be extracted automatically."
-        ),
-        "sources": sources,
-    }
+    return response

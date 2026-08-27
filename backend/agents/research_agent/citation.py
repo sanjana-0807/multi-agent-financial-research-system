@@ -1,36 +1,26 @@
-from typing import Any
+from typing import List, Dict
 
 
 def build_citations(
-    chunks: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+    retrieved_chunks: List[Dict]
+) -> List[Dict]:
+    """
+    Convert retrieved chunks into clean, unique source citations.
+
+    Citations are deduplicated by document + page.
+    """
 
     citations = []
     seen = set()
 
-    for chunk in chunks:
+    for chunk in retrieved_chunks:
 
-        metadata = chunk.get(
-            "metadata",
-            {},
-        )
-
-        document_id = metadata.get(
-            "document_id"
-        )
-
-        page = metadata.get(
-            "page"
-        )
-
-        source = metadata.get(
-            "source"
-        )
+        document_id = chunk.get("document_id")
+        page = chunk.get("page")
 
         key = (
             document_id,
-            page,
-            source,
+            page
         )
 
         if key in seen:
@@ -38,12 +28,11 @@ def build_citations(
 
         seen.add(key)
 
-        citations.append(
-            {
-                "document_id": document_id,
-                "page": page,
-                "source": source,
-            }
-        )
+        citations.append({
+            "document_id": document_id,
+            "filename": chunk.get("filename", "Unknown"),
+            "page": page,
+            "source": chunk.get("source", "Unknown")
+        })
 
     return citations

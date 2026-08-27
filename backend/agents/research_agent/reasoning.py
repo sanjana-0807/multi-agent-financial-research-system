@@ -1,115 +1,135 @@
-from typing import Any
-import re
+from typing import List, Dict
 
 
-class ResearchReasoner:
+def build_research_context(
+    question: str,
+    retrieved_chunks: List[Dict]
+) -> str:
     """
-    Performs reasoning over retrieved financial-document context.
+    Build the evidence context for the Research Agent.
+
+    Retrieved chunks are already ranked by relevance, with the
+    strongest evidence appearing first.
     """
 
-    def analyze(
-        self,
-        question: str,
-        context: str,
-    ) -> dict[str, Any]:
+    if not retrieved_chunks:
+        return (
+            "No relevant information was retrieved from the document."
+        )
 
-        if not question.strip() or not context.strip():
-            return {
-                "question": question,
-                "analysis": "",
-                "conclusion": "",
-                "insufficient_context": True,
-            }
+    context_parts = []
 
-        question_lower = question.lower()
+    for index, chunk in enumerate(retrieved_chunks, start=1):
 
-        # Revenue questions
-        if "revenue" in question_lower:
-            match = re.search(
-                r"Revenue\s*:\s*\$?\s*([\d,.]+)\s*(Million|Billion|Thousand)?",
-                context,
-                re.IGNORECASE,
-            )
+        context_parts.append(
+            f"""
+SOURCE {index}
+Document ID: {chunk.get("document_id")}
+Filename: {chunk.get("filename", "Unknown")}
+Page: {chunk.get("page", "Unknown")}
+Source type: {chunk.get("source", "Unknown")}
+Relevance score: {chunk.get("relevance_score", "Unknown")}
 
-            if match:
-                amount = match.group(1)
-                unit = match.group(2)
+CONTENT:
+{chunk.get("text", "")}
+"""
+        )
 
-                if unit:
-                    answer = f"The company's revenue was ${amount} {unit}."
-                else:
-                    answer = f"The company's revenue was ${amount}."
+    return (
+        f"USER QUESTION:\n{question}\n\n"
+        "RETRIEVED DOCUMENT EVIDENCE:\n"
+        + "\n".join(context_parts)
+    )
 
-                return {
-                    "question": question,
-                    "analysis": (
-                        "The retrieved annual report states "
-                        f"Revenue: ${amount}"
-                        f"{' ' + unit if unit else ''}."
-                    ),
-                    "conclusion": answer,
-                    "insufficient_context": False,
-                }
 
-        # Net profit questions
-        if "net profit" in question_lower or "profit" in question_lower:
-            match = re.search(
-                r"Net\s+Profit\s*:\s*\$?\s*([\d,.]+)\s*(Million|Billion|Thousand)?",
-                context,
-                re.IGNORECASE,
-            )
+def create_research_prompt(
+    question: str,
+    retrieved_chunks: List[Dict]
+) -> str:
+    """
+    Create a strict grounded-research prompt.
+    """
 
-            if match:
-                amount = match.group(1)
-                unit = match.group(2)
+    context = build_research_context(
+        question,
+        retrieved_chunks
+    )
 
-                if unit:
-                    answer = f"The company's net profit was ${amount} {unit}."
-                else:
-                    answer = f"The company's net profit was ${amount}."
+    return f"""
+You are a financial research assistant analyzing a company's
+financial filing.
 
-                return {
-                    "question": question,
-                    "analysis": (
-                        "The retrieved annual report contains "
-                        f"Net Profit: ${amount}"
-                        f"{' ' + unit if unit else ''}."
-                    ),
-                    "conclusion": answer,
-                    "insufficient_context": False,
-                }
+Your answer MUST be based ONLY on the retrieved document evidence.
 
-        # Operating margin questions
-        if "operating margin" in question_lower:
-            match = re.search(
-                r"Operating\s+Margin\s*:\s*([\d,.]+)\s*%",
-                context,
-                re.IGNORECASE,
-            )
+IMPORTANT RULES:
 
-            if match:
-                value = match.group(1)
+1. Do NOT use outside knowledge.
+2. Do NOT invent or estimate financial values.
+3. Prioritize evidence that directly answers the user's question.
+4. If the retrieved evidence explicitly states the requested metric
+   and fiscal year, use that value directly.
+5. Do not calculate a value when the document already provides the
+   value explicitly.
+6. Do not confuse expenses, liabilities, segment revenue,
+   customer advances, or other financial metrics with total company
+   revenue.
+7. Make sure the fiscal year in the evidence matches the fiscal year
+   requested by the user.
+8. If a direct statement exists in the retrieved evidence, do NOT
+   claim that the evidence is insufficient.
+9. If multiple sources contain conflicting information, explain the
+   conflict instead of silently choosing one.
+10. If the evidence truly does not contain enough information, say:
+    "The available document evidence is insufficient to answer the
+    question."
+11. Every important factual claim must include its source page.
+12. Keep the answer concise.
+13. Do not cite pages that do not support the claim.
+IMPORTANT RULES:
 
-                return {
-                    "question": question,
-                    "analysis": (
-                        f"The retrieved annual report states "
-                        f"an operating margin of {value}%."
-                    ),
-                    "conclusion": (
-                        f"The company's operating margin was {value}%."
-                    ),
-                    "insufficient_context": False,
-                }
+1. Do NOT use outside knowledge.
+2. Do NOT invent or estimate financial values.
+3. Prioritize evidence that directly answers the user's question.
+4. If the retrieved evidence explicitly states the requested metric
+   and fiscal year, use that value directly.
+5. Do not calculate a value when the document already provides the
+   value explicitly.
+6. Do not confuse expenses, liabilities, segment revenue,
+   customer advances, or other financial metrics with total company
+   revenue.
+7. Make sure the fiscal year in the evidence matches the fiscal year
+   requested by the user.
+8. If a direct statement exists in the retrieved evidence, do NOT
+   claim that the evidence is insufficient.
+9. If multiple sources contain conflicting information, explain the
+   conflict instead of silently choosing one.
+10. If the evidence truly does not contain enough information, say:
+    "The available document evidence is insufficient to answer the
+    question."
+11. Every important factual claim must include its source page.
+12. Keep the answer concise.
+13. Do not cite pages that do not support the claim.
+OUTPUT FORMAT:
 
-        # Generic fallback
-        return {
-            "question": question,
-            "analysis": context,
-            "conclusion": (
-                "The retrieved financial document contains "
-                "information relevant to the question, but I could "
-                "not extract a specific numerical answer."
-            ),
-            "insufficient_context": False,
-        }
+Answer:
+<direct answer>
+
+Evidence:
+Page <page number> — <short explanation of the evidence>
+
+If the question cannot be answered:
+
+Answer:
+The available document evidence is insufficient to answer the question.
+
+Evidence:
+<explain what information is missing and cite the relevant pages if
+appropriate>
+
+{context}
+
+USER QUESTION:
+{question}
+
+FINAL ANSWER:
+"""
