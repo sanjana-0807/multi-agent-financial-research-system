@@ -42,12 +42,15 @@ function AppLayout() {
   }
 
   return (
-    <div className="flex min-h-screen bg-slate-50 text-slate-900">
+    // h-screen + overflow-hidden on the shell means the WINDOW never
+    // scrolls. Only the content pane below (overflow-y-auto) scrolls,
+    // so the sidebar column stays visually fixed no matter how tall a
+    // page's content gets.
+    <div className="flex h-screen bg-slate-50 text-slate-900 overflow-hidden">
       {/* Width-collapsing wrapper gives the sidebar a smooth slide-in/out
-          instead of an abrupt mount/unmount when crossing into or out of
-          a workspace. */}
+          when crossing into or out of a workspace. */}
       <div
-        className={`transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0 ${
+        className={`h-screen transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0 ${
           showSidebar ? 'w-64' : 'w-0'
         }`}
       >
@@ -56,7 +59,7 @@ function AppLayout() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
         <Navbar onOpenLogout={() => setShowLogoutConfirm(true)} />
         <main className="flex-1">
           <Outlet />
