@@ -4,31 +4,18 @@ import Modal from '../../components/Modal.jsx'
 function CreateWorkspaceModal({ open, onClose, onCreate }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [companyName, setCompanyName] = useState('')
-  const [ticker, setTicker] = useState('')
-  const [industry, setIndustry] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!name.trim() || !companyName.trim() || !ticker.trim()) return
+    if (!name.trim()) return
     setSubmitting(true)
     setError(null)
     try {
-      await onCreate({
-        name: name.trim(),
-        description: description.trim(),
-        objective: description.trim(),
-        companyName: companyName.trim(),
-        ticker: ticker.trim().toUpperCase(),
-        industry: industry.trim() || undefined,
-      })
+      await onCreate({ name: name.trim(), description: description.trim(), objective: description.trim() })
       setName('')
       setDescription('')
-      setCompanyName('')
-      setTicker('')
-      setIndustry('')
       onClose()
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to create session')
@@ -56,44 +43,9 @@ function CreateWorkspaceModal({ open, onClose, onCreate }) {
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            rows={2}
+            rows={3}
             placeholder="Brief description of this research session"
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Company Name</label>
-            <input
-              type="text"
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              required
-              placeholder="Tesla Inc."
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Ticker</label>
-            <input
-              type="text"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
-              required
-              maxLength={10}
-              placeholder="TSLA"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
-        <div>
-          <label className="block text-sm text-gray-600 mb-1">Industry (optional)</label>
-          <input
-            type="text"
-            value={industry}
-            onChange={(e) => setIndustry(e.target.value)}
-            placeholder="Automotive"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -105,7 +57,7 @@ function CreateWorkspaceModal({ open, onClose, onCreate }) {
 
         <button
           type="submit"
-          disabled={submitting || !name.trim() || !companyName.trim() || !ticker.trim()}
+          disabled={submitting || !name.trim()}
           className="w-full bg-blue-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
         >
           {submitting ? 'Creating...' : 'Create Session'}

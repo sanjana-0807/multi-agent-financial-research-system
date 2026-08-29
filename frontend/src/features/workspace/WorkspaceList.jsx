@@ -49,7 +49,7 @@ const GUIDE_STEPS = [
 ]
 
 function WorkspaceList() {
-  const { sessions, createSession, deleteSession, setActiveWorkspace, uploadHistory } = useWorkspace()
+  const { sessions, createSession, deleteSession, setActiveWorkspace, activeDocument } = useWorkspace()
   const [modalOpen, setModalOpen] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [currentStepIndex, setCurrentStepIndex] = useState(0)
@@ -72,8 +72,8 @@ function WorkspaceList() {
 }
 
 async function handleOpenWorkspace(ws) {
-  await setActiveWorkspace(ws)
-  navigate(activeDocument ? '/dashboard' : '/upload')
+  const hasDocument = await setActiveWorkspace(ws)
+  navigate(hasDocument ? '/dashboard' : '/upload')
 }
 
   const currentStep = GUIDE_STEPS[currentStepIndex]

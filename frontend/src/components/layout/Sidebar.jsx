@@ -1,9 +1,6 @@
 import { useState } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
-import {
-  LayoutDashboard, Upload, FolderKanban, Plus,
-  FileText, Settings as SettingsIcon, ChevronRight, Sparkles, Database
-} from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, Settings as SettingsIcon } from 'lucide-react'
 import { useWorkspace } from '../../context/WorkspaceContext.jsx'
 import CreateWorkspaceModal from '../../features/workspace/CreateWorkspaceModal.jsx'
 
@@ -12,20 +9,17 @@ function Sidebar() {
   const [showCreateModal, setShowCreateModal] = useState(false)
   const navigate = useNavigate()
 
-  function handleCreate(data) {
-    const newSession = createSession(data)
-    setActiveWorkspace(newSession)
+  async function handleCreate(data) {
+    const { workspace } = await createSession(data)
     setShowCreateModal(false)
+    // New workspace has no companies/documents yet -> straight to upload
     navigate('/upload')
   }
 
-  function handleSwitchSession(session) {
-    setActiveWorkspace(session)
-    if (session.document_count > 0 || session.extractionData) {
-      navigate('/dashboard')
-    } else {
-      navigate('/upload')
-    }
+  async function handleSwitchSession(session) {
+    const hasData = await setActiveWorkspace(session)
+    // setActiveWorkspace returns true if a processed doc/extraction was found
+    navigate(hasData ? '/dashboard' : '/upload')
   }
 
   return (
@@ -43,44 +37,8 @@ function Sidebar() {
         </div>
       </div>
 
-      {/* Main Navigation Links */}
-      <div className="px-3 pt-4 space-y-1">
-        <NavLink
-          to="/dashboard"
-          className={({ isActive }) =>
-            `flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
-              isActive
-                ? 'bg-blue-50 text-blue-600 border border-blue-200/80 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`
-          }
-        >
-          <div className="flex items-center gap-2.5">
-            <LayoutDashboard size={16} className="text-blue-600" />
-            <span>Overview Dashboard</span>
-          </div>
-          <ChevronRight size={13} className="text-slate-400" />
-        </NavLink>
-
-        <NavLink
-          to="/upload"
-          className={({ isActive }) =>
-            `flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all ${
-              isActive
-                ? 'bg-blue-50 text-blue-600 border border-blue-200/80 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
-            }`
-          }
-        >
-          <div className="flex items-center gap-2.5">
-            <Upload size={16} className="text-blue-600" />
-            <span>Upload Disclosures</span>
-          </div>
-          <ChevronRight size={13} className="text-slate-400" />
-        </NavLink>
-      </div>
-
-      {/* SESSIONS SECTION (Matching index.html) */}
+      {/* SESSIONS — the only nav content now; Overview/Document/Extraction/etc.
+          live inside WorkspaceDetailPage's own tab bar, not here */}
       <div className="flex-1 px-3 pt-5 pb-2 overflow-y-auto custom-scrollbar flex flex-col">
         <div className="px-2 pb-2 text-[10px] font-extrabold uppercase tracking-widest text-slate-400 flex items-center justify-between">
           <span>YOUR SESSIONS</span>
@@ -120,7 +78,7 @@ function Sidebar() {
         </div>
       </div>
 
-      {/* Bottom Actions: Create Session & Settings */}
+      {/* Bottom Actions */}
       <div className="p-3 border-t border-slate-100 space-y-1.5 bg-slate-50/50">
         <button
           type="button"
@@ -131,22 +89,16 @@ function Sidebar() {
           <span>＋ Create New Session</span>
         </button>
 
-        <NavLink
-          to="/settings"
-          className={({ isActive }) =>
-            `flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
-              isActive
-                ? 'bg-blue-50 text-blue-700'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-            }`
-          }
+        <button
+          type="button"
+          onClick={() => navigate('/settings')}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100"
         >
           <SettingsIcon size={14} className="text-slate-400" />
           <span>Settings & Preferences</span>
-        </NavLink>
+        </button>
       </div>
 
-      {/* Modal for creating new session */}
       <CreateWorkspaceModal
         open={showCreateModal}
         onClose={() => setShowCreateModal(false)}
