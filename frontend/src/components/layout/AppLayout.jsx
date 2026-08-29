@@ -12,6 +12,12 @@ function AppLayout() {
   const navigate = useNavigate()
   const { logout } = useAuth()
 
+  // The /sessions page IS the workspace browser — it already lists every
+  // session as a card. Showing the sidebar's own session list next to it
+  // is redundant navigation for the same job. The sidebar only appears
+  // once the user is actually inside a workspace (any other route).
+  const showSidebar = location.pathname !== '/sessions'
+
   // Track root entry page and intercept back button at the main sessions page
   useEffect(() => {
     if (location.pathname === '/sessions') {
@@ -37,7 +43,19 @@ function AppLayout() {
 
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900">
-      <Sidebar />
+      {/* Width-collapsing wrapper gives the sidebar a smooth slide-in/out
+          instead of an abrupt mount/unmount when crossing into or out of
+          a workspace. */}
+      <div
+        className={`transition-all duration-300 ease-in-out overflow-hidden flex-shrink-0 ${
+          showSidebar ? 'w-64' : 'w-0'
+        }`}
+      >
+        <div className="w-64 h-full">
+          <Sidebar />
+        </div>
+      </div>
+
       <div className="flex-1 flex flex-col min-w-0">
         <Navbar onOpenLogout={() => setShowLogoutConfirm(true)} />
         <main className="flex-1">
