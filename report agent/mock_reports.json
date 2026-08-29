@@ -1,0 +1,77 @@
+[
+  {
+    "company_name": "Microsoft",
+    "report_period": "FY2025",
+    "extracted_data": {
+      "summary": "Microsoft showed strong revenue growth and stable profitability in FY2025.",
+      "financials": {
+        "Revenue": "₹120 Crores",
+        "Profit": "₹30 Crores",
+        "Assets": "₹300 Crores",
+        "Liabilities": "₹140 Crores",
+        "Cash Flow": "₹45 Crores",
+        "EPS": "₹15.20"
+      },
+      "outlook": "Positive growth expected."
+    },
+    "red_flags": [
+      "Increasing operating expenses."
+    ],
+    "comparison_data": {
+      "Compared Company": "Apple Inc.",
+      "Revenue Comparison": "Microsoft revenue is higher.",
+      "Profit Comparison": "Microsoft reported higher profit."
+    }
+  },
+
+  {
+    "company_name": "Tesla",
+    "report_period": "FY2025",
+    "extracted_data": {
+      "summary": "Tesla maintained strong business performance with continued expansion.",
+      "financials": {
+        "Revenue": "₹90 Crores",
+        "Profit": "₹15 Crores",
+        "Assets": "₹220 Crores",
+        "Liabilities": "₹110 Crores",
+        "Cash Flow": "₹25 Crores",
+        "EPS": "₹8.75"
+      },
+      "outlook": "Moderate growth expected."
+    },
+    "red_flags": [
+      "High production costs.",
+      "Increased liabilities."
+    ],
+    "comparison_data": {
+      "Compared Company": "Microsoft",
+      "Revenue Comparison": "Microsoft revenue is higher.",
+      "Profit Comparison": "Microsoft reported higher profit."
+    }
+  },
+
+  {
+    "company_name": "Amazon",
+    "report_period": "FY2025",
+    "extracted_data": {
+      "summary": "Amazon demonstrated strong revenue performance with continued business expansion.",
+      "financials": {
+        "Revenue": "₹150 Crores",
+        "Profit": "₹25 Crores",
+        "Assets": "₹400 Crores",
+        "Liabilities": "₹200 Crores",
+        "Cash Flow": "₹40 Crores",
+        "EPS": "₹10.50"
+      },
+      "outlook": "Positive long-term growth expected."
+    },
+    "red_flags": [
+      "High liabilities compared to assets."
+    ],
+    "comparison_data": {
+      "Compared Company": "Apple Inc.",
+      "Revenue Comparison": "Amazon revenue is higher.",
+      "Profit Comparison": "Amazon reported higher profit."
+    }
+  }
+]
