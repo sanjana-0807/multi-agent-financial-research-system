@@ -66,7 +66,7 @@ The Report Agent generates:
 1. Executive Summary
 2. Key Financials
 3. Red Flags
-4. Company Comparison
+4. Comparison
 5. Outlook
 
 ## Storage
