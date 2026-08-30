@@ -1,0 +1,27 @@
+{
+  "company_name": "Apple Inc.",
+  "report_period": "FY2025",
+
+  "extracted_data": {
+    "summary": "Apple Inc. showed strong financial performance in FY2025.",
+
+    "financials": {
+      "Revenue": "₹100 Crores",
+      "Profit": "₹20 Crores",
+      "Assets": "₹250 Crores",
+      "Liabilities": "₹120 Crores",
+      "Cash Flow": "₹35 Crores",
+      "EPS": "₹12.50"
+    },
+
+    "outlook": "Positive growth expected."
+  },
+
+ "red_flags": [],
+
+  "comparison_data": {
+    "Compared Company": "Microsoft",
+    "Revenue Comparison": "Apple revenue is higher.",
+    "Profit Comparison": "Both companies are profitable."
+  }
+}
