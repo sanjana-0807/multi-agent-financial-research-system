@@ -1,4 +1,4 @@
-from backend.vectorstore.chroma_client import collection
+from vectorstore.chroma_client import collection
 
 
 def fetch_document_text(document_id: str):

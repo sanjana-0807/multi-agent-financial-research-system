@@ -46,10 +46,8 @@ def parse_number(value: str) -> Optional[float]:
 
     if "billion" in lower or re.search(r"\bbn\b", lower):
         multiplier = 1_000_000_000
-
     elif "million" in lower or re.search(r"\bmn\b", lower):
         multiplier = 1_000_000
-
     elif "thousand" in lower:
         multiplier = 1_000
 
@@ -70,12 +68,7 @@ def parse_number(value: str) -> Optional[float]:
 
     try:
         result = float(value) * multiplier
-
-        if negative:
-            return -result
-
-        return result
-
+        return -result if negative else result
     except ValueError:
         return None
 
@@ -85,11 +78,9 @@ def parse_number(value: str) -> Optional[float]:
 # ---------------------------------------------------------
 
 def numeric_candidates(text: str):
-
     results = []
 
     for match in NUMBER_RE.finditer(text):
-
         raw = match.group(0).strip()
 
         value = parse_number(raw)
@@ -101,14 +92,7 @@ def numeric_candidates(text: str):
         if 1900 <= abs(value) <= 2100:
             continue
 
-        results.append(
-            (
-                match.start(),
-                match.end(),
-                raw,
-                value,
-            )
-        )
+        results.append((match.start(), match.end(), raw, value))
 
     return results
 
@@ -123,14 +107,7 @@ def extract_table_value(
     search_distance: int = 1000,
 ) -> Optional[float]:
 
-    if not text:
-        return None
-
-    normalized = re.sub(
-        r"[ \t]+",
-        " ",
-        text,
-    )
+    normalized = re.sub(r"[ \t]+", " ", text)
 
     candidates = []
 
@@ -143,7 +120,6 @@ def extract_table_value(
         ):
 
             start = match.end()
-
             end = min(
                 len(normalized),
                 start + search_distance,
@@ -163,25 +139,22 @@ def extract_table_value(
             if not numbers:
                 continue
 
+            # Strong preference for a financial-table pattern:
+            # multiple numbers close together.
             score = 0
 
-            # Financial tables usually have multiple numbers.
             if len(numbers) >= 2:
                 score += 5
 
             if len(numbers) >= 3:
                 score += 3
 
-            # Currency markers.
-            if (
-                "$" in after
-                or "₹" in after
-                or "Rs." in after
-            ):
+            # Currency markers strongly suggest a financial table.
+            if "$" in after or "₹" in after or "Rs." in after:
                 score += 3
 
-            # Percentage-heavy text is usually not
-            # the main financial statement.
+            # Percentage-heavy text is usually a chart,
+            # not the target financial statement.
             percent_count = after.count("%")
 
             if percent_count >= 2:
@@ -206,7 +179,7 @@ def extract_table_value(
     if not candidates:
         return None
 
-    # Highest score wins.
+    # Highest-scoring candidate wins.
     candidates.sort(
         key=lambda x: x[0],
         reverse=True,
@@ -219,9 +192,12 @@ def extract_table_value(
 # Company
 # ---------------------------------------------------------
 
-def extract_company(
-    text: str,
-) -> Optional[str]:
+def extract_company(text: str) -> Optional[str]:
+    """
+    Dynamically extract the company name from an annual report.
+
+    This function does not contain company-specific rules.
+    """
 
     if not text:
         return None
@@ -229,28 +205,25 @@ def extract_company(
     text = text[:30000]
 
     patterns = [
-
         # -----------------------------------------------------
         # SEC registrant format
         # -----------------------------------------------------
-
         r"""
         (?:Exact\s+name\s+of\s+registrant
         |Exact\s+name\s+of\s+registrant\s+as\s+specified\s+in\s+its\s+charter)
         \s*[:\-]?\s*
         ([A-Z][A-Za-z0-9&.,'’\- ]{2,100}?)
         (?:
-            \s*\(
-            |\s*Commission\s+File\s+Number
-            |\s+I\.R\.S\.
-            |\s+IRS
+            \s*\(|\s*
+            Commission\s+File\s+Number|
+            \s+I\.R\.S\.|
+            \s+IRS
         )
         """,
 
         # -----------------------------------------------------
         # Company & Consolidated Subsidiaries
         # -----------------------------------------------------
-
         r"""
         \b(
             [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
@@ -265,7 +238,6 @@ def extract_company(
         # -----------------------------------------------------
         # Company and Subsidiaries
         # -----------------------------------------------------
-
         r"""
         \b(
             [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
@@ -280,7 +252,6 @@ def extract_company(
         # -----------------------------------------------------
         # Generic legal company name
         # -----------------------------------------------------
-
         r"""
         \b(
             [A-Z][A-Za-z0-9&.,'’\- ]{2,100}?
@@ -317,17 +288,11 @@ def extract_company(
 
     return None
 
-
 # ---------------------------------------------------------
 # Fiscal year
 # ---------------------------------------------------------
 
-def extract_fiscal_year(
-    text: str,
-) -> Optional[int]:
-
-    if not text:
-        return None
+def extract_fiscal_year(text: str) -> Optional[int]:
 
     patterns = [
         r"fiscal year ended.*?\b(20\d{2})\b",
@@ -338,9 +303,9 @@ def extract_fiscal_year(
     for pattern in patterns:
 
         match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE | re.DOTALL,
+             pattern,
+               text,
+                 re.IGNORECASE | re.DOTALL,
         )
 
         if match:
@@ -386,9 +351,7 @@ def extract_assets(text: str):
 
     return extract_table_value(
         text,
-        [
-            r"Total assets",
-        ],
+        [r"Total assets"],
         search_distance=500,
     )
 
@@ -397,9 +360,7 @@ def extract_liabilities(text: str):
 
     return extract_table_value(
         text,
-        [
-            r"Total liabilities",
-        ],
+        [r"Total liabilities"],
         search_distance=500,
     )
 
@@ -468,7 +429,6 @@ def extract_financial_data(
 ) -> Dict[str, Any]:
 
     if not document_text:
-
         return {
             "metric_id": metric_id,
             "document_id": document_id,
@@ -487,128 +447,47 @@ def extract_financial_data(
             },
         }
 
-    # -----------------------------------------------------
-    # Extract values
-    # -----------------------------------------------------
-
     company = extract_company(document_text)
 
-    fiscal_year = extract_fiscal_year(
-        document_text
-    )
+    fiscal_year = extract_fiscal_year(document_text)
 
-    revenue = extract_revenue(
-        document_text
-    )
+    revenue = extract_revenue(document_text)
 
-    net_profit = extract_net_profit(
-        document_text
-    )
+    net_profit = extract_net_profit(document_text)
 
-    assets = extract_assets(
-        document_text
-    )
+    assets = extract_assets(document_text)
 
-    liabilities = extract_liabilities(
-        document_text
-    )
+    liabilities = extract_liabilities(document_text)
 
-    cash_flow = extract_cash_flow(
-        document_text
-    )
+    cash_flow = extract_cash_flow(document_text)
 
-    eps = extract_eps(
-        document_text
-    )
+    eps = extract_eps(document_text)
 
-    current_ratio = extract_current_ratio(
-        document_text
-    )
+    current_ratio = extract_current_ratio(document_text)
 
-    debt_to_equity = extract_debt_to_equity(
-        document_text
-    )
+    debt_to_equity = extract_debt_to_equity(document_text)
 
-    # -----------------------------------------------------
-    # Calculate Net Profit Margin
-    # -----------------------------------------------------
-
-    if (
-        revenue is not None
-        and revenue != 0
-        and net_profit is not None
-    ):
-
+    if revenue is not None and revenue != 0 and net_profit is not None:
         net_profit_margin = (
             net_profit / revenue
         ) * 100
-
     else:
-
         net_profit_margin = None
 
-    # -----------------------------------------------------
-    # Calculate Debt to Equity if not directly extracted
-    # -----------------------------------------------------
-
-    if (
-        debt_to_equity is None
-        and assets is not None
-        and liabilities is not None
-    ):
-
-        equity = assets - liabilities
-
-        if equity != 0:
-            debt_to_equity = (
-                liabilities / equity
-            )
-
-    # -----------------------------------------------------
-    # Return result
-    # -----------------------------------------------------
-
     return {
-
-        "metric_id":
-            metric_id,
-
-        "document_id":
-            document_id,
-
-        "company":
-            company,
-
-        "fiscal_year":
-            fiscal_year,
-
-        "revenue":
-            revenue,
-
-        "net_profit":
-            net_profit,
-
-        "assets":
-            assets,
-
-        "liabilities":
-            liabilities,
-
-        "cash_flow":
-            cash_flow,
-
-        "eps":
-            eps,
-
+        "metric_id": metric_id,
+        "document_id": document_id,
+        "company": company,
+        "fiscal_year": fiscal_year,
+        "revenue": revenue,
+        "net_profit": net_profit,
+        "assets": assets,
+        "liabilities": liabilities,
+        "cash_flow": cash_flow,
+        "eps": eps,
         "ratios": {
-
-            "current_ratio":
-                current_ratio,
-
-            "debt_to_equity":
-                debt_to_equity,
-
-            "net_profit_margin":
-                net_profit_margin,
+            "current_ratio": current_ratio,
+            "debt_to_equity": debt_to_equity,
+            "net_profit_margin": net_profit_margin,
         },
     }

@@ -1,9 +1,7 @@
 import chromadb
 
 
-# Use the same ChromaDB used by the existing
-# embedding/ingestion pipeline.
-CHROMA_PATH = "./chroma_storage"
+CHROMA_PATH = "vectorstore/chroma_data"
 
 client = chromadb.PersistentClient(
     path=CHROMA_PATH

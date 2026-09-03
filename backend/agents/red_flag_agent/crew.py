@@ -4,8 +4,8 @@ import re
 
 from crewai import Crew, Process
 
-from backend.agents.red_flag_agent.agent import create_red_flag_agent
-from backend.agents.red_flag_agent.tasks import create_red_flag_task
+from agents.red_flag_agent.agent import create_red_flag_agent
+from agents.red_flag_agent.tasks import create_red_flag_task
 
 
 def _extract_json(raw: str) -> dict:

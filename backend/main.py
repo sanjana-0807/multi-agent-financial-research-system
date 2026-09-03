@@ -1,168 +1,58 @@
 from contextlib import asynccontextmanager
-import os
-
 from fastapi import FastAPI
-from motor.motor_asyncio import AsyncIOMotorClient
-from beanie import init_beanie
-from dotenv import load_dotenv
 
-# ============================================================
-# ROUTES
-# ============================================================
+from database.mongo_client import init_db
 
-from backend.routes.research import router as research_router
-
-# ============================================================
-# MODELS
-# ============================================================
-
-from backend.models.red_flag import RedFlagResult
-from models.extracted_metric import ExtractedMetric
-from models.red_flag import RedFlag
-
-# ============================================================
-# SERVICES
-# ============================================================
-
-from backend.services.red_flag_service import run_red_flag_analysis
-
-
-load_dotenv()
-
-
-# ============================================================
-# MONGODB LIFESPAN
-# ============================================================
+from routes import companies
+from routes import auth
+from routes import research
+from routes import comparison
+from routes import documents
+from routes import extraction
+from routes import red_flag
+from routes import workspace
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
-    print("Starting Financial Research API...")
-
-    # --------------------------------------------------------
-    # Environment variables
-    # --------------------------------------------------------
-
-    mongo_uri = os.getenv("MONGO_URI")
-    database_name = os.getenv("DATABASE_NAME")
-
-    if not mongo_uri:
-        raise RuntimeError(
-            "MONGO_URI is not set in .env"
-        )
-
-    if not database_name:
-        raise RuntimeError(
-            "DATABASE_NAME is not set in .env"
-        )
-
-    # --------------------------------------------------------
-    # MongoDB connection
-    # --------------------------------------------------------
-
-    client = AsyncIOMotorClient(mongo_uri)
-
-    database = client[database_name]
-
-    # --------------------------------------------------------
-    # Beanie initialization
-    # --------------------------------------------------------
-
-    await init_beanie(
-        database=database,
-        document_models=[
-            RedFlagResult,
-            ExtractedMetric,
-            RedFlag,
-        ],
-    )
-
-    print(
-        "Beanie MongoDB initialized successfully!"
-    )
-
-    # --------------------------------------------------------
-    # Application runs
-    # --------------------------------------------------------
-
+    # Startup: connect to MongoDB and initialize Beanie document models
+    await init_db()
     yield
 
-    # --------------------------------------------------------
-    # Shutdown
-    # --------------------------------------------------------
-
-    client.close()
-
-    print(
-        "MongoDB connection closed."
-    )
-
-
-# ============================================================
-# FASTAPI APPLICATION
-# ============================================================
 
 app = FastAPI(
-    title="Financial Research API",
-    description=(
-        "Financial document extraction "
-        "and red-flag analysis API"
-    ),
-    version="2.0.0",
+    title="Multi-Agent Financial Research System",
+    description="Backend API for Multi-Agent Financial Research System",
+    version="1.0.0",
     lifespan=lifespan,
 )
+from fastapi.middleware.cors import CORSMiddleware
 
-
-# ============================================================
-# REGISTER RESEARCH ROUTES
-# ============================================================
-
-app.include_router(
-    research_router
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-# ============================================================
-# ROOT
-# ============================================================
+app.include_router(companies.router)
+app.include_router(auth.router)
+app.include_router(research.router)
+app.include_router(comparison.router)
+app.include_router(documents.router)
+app.include_router(extraction.router)
+app.include_router(red_flag.router)
+app.include_router(workspace.router)
 
 @app.get("/")
-async def root():
-
+def root():
     return {
-        "message": "Financial Research API is running",
-        "status": "success",
+        "message": "Welcome to Multi-Agent Financial Research System Backend"
     }
 
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.get("/health")
-async def health():
-
+def health_check():
     return {
-        "status": "healthy",
-    }
-
-
-# ============================================================
-# RED FLAG ANALYSIS
-# ============================================================
-
-@app.post(
-    "/research/red-flags/{document_id}"
-)
-async def analyze_red_flags(
-    document_id: str
-):
-
-    result = await run_red_flag_analysis(
-        document_id
-    )
-
-    return {
-        "success": True,
-        "data": result,
+        "status": "healthy"
     }
