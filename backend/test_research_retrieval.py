@@ -1,22 +1,40 @@
-from agents.research_agent.retrieval import retrieve_relevant_chunks
+from agents.research_agent.retriever import retrieve_relevant_chunks
 
 
-document_id = "D09AE81D6"
+DOCUMENT_ID = "DC4FB216A"
 
-question = "What was the revenue in 2025?"
+QUESTION = "What was NVIDIA's revenue in fiscal 2025?"
 
-results = retrieve_relevant_chunks(
-    question=question,
-    document_id=document_id,
-    top_k=5,
-)
 
-print("\n===== RETRIEVED CHUNKS =====\n")
+def main():
 
-for index, result in enumerate(results, start=1):
-    print(f"--- Result {index} ---")
-    print("Page:", result["page"])
-    print("Chunk:", result["chunk_index"])
-    print("Distance:", result["distance"])
-    print("Text:", result["text"][:500])
-    print()
+    results = retrieve_relevant_chunks(
+        question=QUESTION,
+        document_id=DOCUMENT_ID,
+        top_k=5
+    )
+
+    print("\n===== RESEARCH QUESTION =====")
+    print(QUESTION)
+
+    print("\n===== RETRIEVED CHUNKS =====")
+
+    if not results:
+        print("No relevant chunks found.")
+        return
+
+    for index, result in enumerate(results, start=1):
+
+        print(f"\n--- Result {index} ---")
+
+        print(f"Page: {result['page']}")
+        print(f"Document ID: {result['document_id']}")
+        print(f"Source: {result['source']}")
+        print(f"Distance: {result['distance']}")
+
+        print("\nText:")
+        print(result["text"])
+
+
+if __name__ == "__main__":
+    main()
