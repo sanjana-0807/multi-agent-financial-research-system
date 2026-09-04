@@ -1,10 +1,9 @@
 import re
-
 from typing import List, Dict, Optional
 
 from vectorstore.chroma_client import collection
 
-from .metrics import detect_metric, extract_year
+from .metrics import detect_metric, extract_year, extract_years
 
 
 # =========================================================
@@ -58,6 +57,10 @@ def _is_consolidated_statement(text: str) -> bool:
         "consolidated statements of operations",
         "consolidated statement of operations",
         "consolidated income statement",
+        "consolidated statements of cash flows",
+        "consolidated statement of cash flows",
+        "consolidated balance sheets",
+        "consolidated balance sheet",
     ]
 
     return any(
@@ -102,7 +105,6 @@ def _metric_terms(metric: Optional[str]) -> List[str]:
     """
 
     terms = {
-
         "net_sales": [
             "net sales",
         ],
@@ -132,6 +134,16 @@ def _metric_terms(metric: Optional[str]) -> List[str]:
             "consolidated net income attributable to walmart",
             "net income attributable to wal-mart",
             "consolidated net income attributable to wal-mart",
+        ],
+
+        "operating_cash_flow": [
+            "operating cash flow",
+            "operating cash flows",
+            "cash flow from operating activities",
+            "cash flows from operating activities",
+            "cash provided by operating activities",
+            "net cash provided by operating activities",
+            "cash generated from operations",
         ],
 
         "diluted_eps": [
@@ -171,7 +183,7 @@ def _calculate_relevance_score(
     year: Optional[str],
 ) -> float:
     """
-    Calculate a relevance score for a retrieved chunk.
+    Calculate a financial-aware relevance score.
 
     Higher score = stronger evidence.
     """
@@ -180,22 +192,22 @@ def _calculate_relevance_score(
         return -999
 
     text_lower = text.lower()
+    question_lower = question.lower()
 
     score = 0.0
 
     # -----------------------------------------------------
-    # 1. SEMANTIC DISTANCE
+    # 1. CHROMA DISTANCE
     # -----------------------------------------------------
 
     if distance is not None:
-
         try:
             distance_value = float(distance)
 
-            # Lower Chroma distance is better.
+            # Lower distance = better semantic match.
             score += max(
                 0,
-                20 - (distance_value * 10)
+                20 - (distance_value * 10),
             )
 
         except (ValueError, TypeError):
@@ -205,9 +217,10 @@ def _calculate_relevance_score(
     # 2. COMPANY NAME
     # -----------------------------------------------------
 
-    question_lower = question.lower()
-
-    if "walmart" in question_lower and "walmart" in text_lower:
+    if (
+        "walmart" in question_lower
+        and "walmart" in text_lower
+    ):
         score += 5
 
     # -----------------------------------------------------
@@ -215,7 +228,6 @@ def _calculate_relevance_score(
     # -----------------------------------------------------
 
     if year:
-
         if year in text_lower:
             score += 20
 
@@ -225,7 +237,7 @@ def _calculate_relevance_score(
         if f"fy {year}" in text_lower:
             score += 10
 
-        if f"ended january 31" in text_lower:
+        if "ended january 31" in text_lower:
             score += 5
 
     # -----------------------------------------------------
@@ -235,14 +247,8 @@ def _calculate_relevance_score(
     metric_signals = _metric_terms(metric)
 
     for signal in metric_signals:
-
         if signal in text_lower:
             score += 25
-
-            # Stronger if the exact metric occurs.
-            if signal == metric:
-                score += 5
-
             break
 
     # -----------------------------------------------------
@@ -279,24 +285,26 @@ def _calculate_relevance_score(
         score += 3
 
     # -----------------------------------------------------
-    # 8. METRIC + YEAR COMBINATION
+    # 8. METRIC + YEAR
     # -----------------------------------------------------
 
     if year and year in text_lower:
-
-        for signal in metric_signals:
-
-            if signal in text_lower:
-                score += 15
-                break
+        if any(
+            signal in text_lower
+            for signal in metric_signals
+        ):
+            score += 15
 
     # -----------------------------------------------------
-    # 9. METRIC + FINANCIAL NUMBER
+    # 9. METRIC-SPECIFIC FINANCIAL EVIDENCE
     # -----------------------------------------------------
 
     if metric == "net_sales":
 
-        if "net sales" in text_lower and "$" in text:
+        if (
+            "net sales" in text_lower
+            and "$" in text
+        ):
             score += 15
 
         if (
@@ -321,7 +329,10 @@ def _calculate_relevance_score(
 
     elif metric == "revenue":
 
-        if "revenue" in text_lower and "$" in text:
+        if (
+            "revenue" in text_lower
+            and "$" in text
+        ):
             score += 15
 
     elif metric == "operating_income":
@@ -332,12 +343,33 @@ def _calculate_relevance_score(
         ):
             score += 15
 
+    elif metric == "operating_cash_flow":
+
+        if (
+            (
+                "operating cash flow" in text_lower
+                or "cash provided by operating activities"
+                in text_lower
+                or "net cash provided by operating activities"
+                in text_lower
+            )
+            and (
+                "$" in text
+                or "million" in text_lower
+                or "billion" in text_lower
+            )
+        ):
+            score += 20
+
     elif metric in {
         "net_income",
         "net_income_attributable",
     }:
 
-        if "net income" in text_lower and "$" in text:
+        if (
+            "net income" in text_lower
+            and "$" in text
+        ):
             score += 15
 
     # -----------------------------------------------------
@@ -346,15 +378,13 @@ def _calculate_relevance_score(
 
     if _is_segment_chunk(text):
 
-        # General company questions should prefer
-        # consolidated company-level evidence.
         if _is_company_level_question(question):
             score -= 50
         else:
             score -= 10
 
     # -----------------------------------------------------
-    # 11. CONSOLIDATED BONUS
+    # 11. COMPANY-LEVEL CONSOLIDATED BONUS
     # -----------------------------------------------------
 
     if (
@@ -367,6 +397,99 @@ def _calculate_relevance_score(
 
 
 # =========================================================
+# MULTI-YEAR EVIDENCE CHECK
+# =========================================================
+
+def _has_strong_multi_year_evidence(
+    text: str,
+    metric: Optional[str],
+    years: List[str],
+    company_level: bool = True,
+) -> bool:
+    """
+    Determine whether a chunk contains strong evidence
+    for all requested years.
+    """
+
+    if not text or len(years) < 2:
+        return False
+
+    text_lower = text.lower()
+
+    # -----------------------------------------------------
+    # REJECT SEGMENT DATA FOR COMPANY QUESTIONS
+    # -----------------------------------------------------
+
+    if (
+        company_level
+        and _is_segment_chunk(text)
+    ):
+        return False
+
+    # -----------------------------------------------------
+    # METRIC CHECK
+    # -----------------------------------------------------
+
+    metric_signals = _metric_terms(metric)
+
+    if not any(
+        signal in text_lower
+        for signal in metric_signals
+    ):
+        return False
+
+    # -----------------------------------------------------
+    # YEAR CHECK
+    # -----------------------------------------------------
+
+    for year in years:
+
+        if not re.search(
+            rf"\b{re.escape(year)}\b",
+            text_lower,
+        ):
+            return False
+
+    # -----------------------------------------------------
+    # FINANCIAL EVIDENCE CHECK
+    # -----------------------------------------------------
+
+    financial_signals = [
+        "fiscal years ended",
+        "amounts in millions",
+        "amounts in billions",
+        "financial highlights",
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "consolidated statement of operations",
+        "consolidated statements of cash flows",
+        "consolidated statement of cash flows",
+        "results of operations",
+        "net sales",
+        "total revenues",
+    ]
+
+    if not any(
+        signal in text_lower
+        for signal in financial_signals
+    ):
+        return False
+
+    # -----------------------------------------------------
+    # COMPANY-LEVEL QUESTIONS REQUIRE CONSOLIDATED DATA
+    # -----------------------------------------------------
+
+    if (
+        company_level
+        and not _is_consolidated_statement(text)
+    ):
+        return False
+
+    return True
+
+
+# =========================================================
 # RETRIEVE RELEVANT CHUNKS
 # =========================================================
 
@@ -376,42 +499,22 @@ def retrieve_relevant_chunks(
     top_k: int = 5,
 ) -> List[Dict]:
     """
-    Retrieve relevant chunks from ChromaDB and rerank them.
+    Retrieve relevant financial chunks from the selected document.
 
-    Flow:
-
-        Question
-            ↓
-        ChromaDB semantic search
-            ↓
-        Retrieve candidate chunks
-            ↓
-        Detect metric + year
-            ↓
-        Financial relevance scoring
-            ↓
-        Rerank
-            ↓
-        Return top_k chunks
+    Priorities:
+    1. Correct document
+    2. Requested metric
+    3. Requested years
+    4. Consolidated/company-level evidence
+    5. Financial tables
+    6. Semantic relevance
     """
-
-    # -----------------------------------------------------
-    # VALIDATE QUESTION
-    # -----------------------------------------------------
 
     if not question or not question.strip():
         return []
 
-    # -----------------------------------------------------
-    # VALIDATE DOCUMENT ID
-    # -----------------------------------------------------
-
     if not document_id or not document_id.strip():
         return []
-
-    # -----------------------------------------------------
-    # VALIDATE TOP K
-    # -----------------------------------------------------
 
     try:
         top_k = int(top_k)
@@ -422,112 +525,63 @@ def retrieve_relevant_chunks(
         top_k = 5
 
     # -----------------------------------------------------
-    # DETECT QUESTION METRIC
+    # DETECT QUESTION INFORMATION
     # -----------------------------------------------------
 
     metric = detect_metric(question)
-
-    # -----------------------------------------------------
-    # DETECT QUESTION YEAR
-    # -----------------------------------------------------
-
     year = extract_year(question)
+    years = extract_years(question)
 
-    # -----------------------------------------------------
-    # DEBUG INFORMATION
-    # -----------------------------------------------------
+    company_level = _is_company_level_question(question)
 
     print()
     print("================ RETRIEVAL ================")
     print(f"Question: {question}")
     print(f"Metric: {metric}")
     print(f"Year: {year}")
+    print(f"Years: {years}")
+    print(f"Company level: {company_level}")
     print("-------------------------------------------")
 
     # -----------------------------------------------------
-    # CHROMADB SEARCH
+    # CHROMA SEARCH
     # -----------------------------------------------------
 
     try:
-
-        # Retrieve more candidates than requested.
-        #
-        # Example:
-        # top_k = 5
-        # retrieve 10
-        # rerank 10
-        # return best 5
-        #
-        n_results = max(
-            top_k,
-            10,
-        )
-
         results = collection.query(
             query_texts=[question],
-            n_results=n_results,
+            n_results=max(50, top_k),
             where={
                 "document_id": document_id
             },
         )
 
     except Exception as exc:
-
-        print(
-            f"ChromaDB retrieval error: {exc}"
-        )
-
+        print(f"ChromaDB retrieval error: {exc}")
         return []
 
-    # -----------------------------------------------------
-    # EXTRACT CHROMADB RESULTS
-    # -----------------------------------------------------
+    documents = results.get("documents", [[]])
+    metadatas = results.get("metadatas", [[]])
+    distances = results.get("distances", [[]])
 
-    documents = results.get(
-        "documents",
-        [[]],
-    )
-
-    metadatas = results.get(
-        "metadatas",
-        [[]],
-    )
-
-    distances = results.get(
-        "distances",
-        [[]],
-    )
-
-    documents = (
-        documents[0]
-        if documents
-        else []
-    )
-
-    metadatas = (
-        metadatas[0]
-        if metadatas
-        else []
-    )
-
-    distances = (
-        distances[0]
-        if distances
-        else []
-    )
+    documents = documents[0] if documents else []
+    metadatas = metadatas[0] if metadatas else []
+    distances = distances[0] if distances else []
 
     # -----------------------------------------------------
     # BUILD CHUNKS
     # -----------------------------------------------------
 
-    retrieved_chunks = []
+    chunks = []
 
     for index, document in enumerate(documents):
 
+        if not document:
+            continue
+
         metadata = (
             metadatas[index]
-            if index < len(metadatas)
-            and metadatas[index]
+            if index < len(metadatas) and metadatas[index]
             else {}
         )
 
@@ -537,77 +591,152 @@ def retrieve_relevant_chunks(
             else None
         )
 
-        chunk = {
-            "text": document or "",
+        score = _calculate_relevance_score(
+            question=question,
+            text=document,
+            distance=distance,
+            metric=metric,
+            year=year,
+        )
 
+        text_lower = document.lower()
+
+        # -------------------------------------------------
+        # EXTRA FINANCIAL PRIORITY
+        # -------------------------------------------------
+
+        # Company-level consolidated statements are extremely
+        # important for company-wide questions.
+        if company_level and _is_consolidated_statement(document):
+            score += 100
+
+        # Requested metric.
+        metric_signals = _metric_terms(metric)
+
+        if any(
+            signal in text_lower
+            for signal in metric_signals
+        ):
+            score += 50
+
+        # Requested years.
+        matched_years = 0
+
+        for requested_year in years:
+            if re.search(
+                rf"\b{re.escape(requested_year)}\b",
+                text_lower,
+            ):
+                matched_years += 1
+
+        score += matched_years * 40
+
+        # Strong multi-year evidence gets a large bonus.
+        if len(years) >= 2:
+
+            if _has_strong_multi_year_evidence(
+                text=document,
+                metric=metric,
+                years=years,
+                company_level=company_level,
+            ):
+                score += 150
+
+        # Segment data should never beat consolidated data
+        # for a company-level question.
+        if (
+            company_level
+            and _is_segment_chunk(document)
+        ):
+            score -= 150
+
+        chunk = {
+            "text": document,
             "document_id": metadata.get(
                 "document_id",
                 document_id,
             ),
-
             "filename": metadata.get(
                 "filename",
             ),
-
             "page": metadata.get(
                 "page",
             ),
-
             "chunk_index": metadata.get(
                 "chunk_index",
             ),
-
             "source": metadata.get(
                 "source",
             ),
-
             "distance": distance,
+            "relevance_score": score,
         }
 
-        # -------------------------------------------------
-        # CALCULATE RELEVANCE
-        # -------------------------------------------------
-
-        chunk["relevance_score"] = (
-            _calculate_relevance_score(
-                question=question,
-                text=chunk["text"],
-                distance=distance,
-                metric=metric,
-                year=year,
-            )
-        )
-
-        retrieved_chunks.append(
-            chunk
-        )
+        chunks.append(chunk)
 
     # -----------------------------------------------------
-    # SORT BY RELEVANCE
+    # SORT
     # -----------------------------------------------------
 
-    retrieved_chunks.sort(
+    chunks.sort(
         key=lambda chunk: (
-            -chunk.get(
-                "relevance_score",
-                -999,
-            ),
-            chunk.get(
-                "distance",
-                float("inf"),
-            ),
+            -chunk.get("relevance_score", -999),
+            chunk.get("distance", float("inf")),
         )
     )
 
     # -----------------------------------------------------
-    # DEBUG OUTPUT
+    # IMPORTANT:
+    # For multi-year questions, make sure we return chunks
+    # containing the requested years rather than allowing
+    # unrelated semantic chunks to occupy all top_k slots.
     # -----------------------------------------------------
 
+    if len(years) >= 2:
+
+        strong_chunks = []
+
+        for chunk in chunks:
+
+            text = chunk.get("text", "")
+
+            if _has_strong_multi_year_evidence(
+                text=text,
+                metric=metric,
+                years=years,
+                company_level=company_level,
+            ):
+                strong_chunks.append(chunk)
+
+        if strong_chunks:
+
+            print(
+                f"Strong multi-year evidence: "
+                f"{len(strong_chunks)} chunk(s)"
+            )
+
+            # Put the strongest multi-year evidence first.
+            remaining = [
+                chunk
+                for chunk in chunks
+                if chunk not in strong_chunks
+            ]
+
+            chunks = strong_chunks + remaining
+
+    # -----------------------------------------------------
+    # FINAL RESULTS
+    # -----------------------------------------------------
+
+    final_chunks = chunks[:top_k]
+
+    print()
+    print("--------------- FINAL RESULTS --------------")
+
     for index, chunk in enumerate(
-        retrieved_chunks[:top_k],
+        final_chunks,
         start=1,
     ):
-
         print(
             f"{index}. "
             f"Page={chunk.get('page')} "
@@ -615,11 +744,9 @@ def retrieve_relevant_chunks(
             f"Distance={chunk.get('distance')}"
         )
 
-    print("===========================================")
+    print(
+        "==========================================="
+    )
     print()
 
-    # -----------------------------------------------------
-    # RETURN TOP K
-    # -----------------------------------------------------
-
-    return retrieved_chunks[:top_k]
+    return final_chunks

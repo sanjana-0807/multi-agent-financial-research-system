@@ -12,7 +12,23 @@ def answer_research_question(
 ) -> Dict:
     """
     Run the complete Research Agent pipeline.
+
+    Flow:
+
+        User Question
+              ↓
+        Research Retriever
+              ↓
+        Relevant Financial Evidence
+              ↓
+        Response Generator
+              ↓
+        Final Research Answer
     """
+
+    # -----------------------------------------------------
+    # VALIDATE QUESTION
+    # -----------------------------------------------------
 
     if not question or not question.strip():
         return {
@@ -23,6 +39,10 @@ def answer_research_question(
             "retrieved_chunks": [],
         }
 
+    # -----------------------------------------------------
+    # VALIDATE DOCUMENT ID
+    # -----------------------------------------------------
+
     if not document_id or not document_id.strip():
         return {
             "question": question,
@@ -31,6 +51,10 @@ def answer_research_question(
             "citations": [],
             "retrieved_chunks": [],
         }
+
+    # -----------------------------------------------------
+    # VALIDATE TOP K
+    # -----------------------------------------------------
 
     try:
         top_k = int(top_k)

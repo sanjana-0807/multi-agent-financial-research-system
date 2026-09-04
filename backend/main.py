@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from database.mongo_client import init_db
 
@@ -11,6 +13,8 @@ from routes import documents
 from routes import extraction
 from routes import red_flag
 from routes import workspace
+from routes import research_chat
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,7 +29,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-from fastapi.middleware.cors import CORSMiddleware
+
+
+# ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +42,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------
+# API ROUTERS
+# ---------------------------------------------------------
 
 app.include_router(companies.router)
 app.include_router(auth.router)
@@ -44,12 +57,24 @@ app.include_router(extraction.router)
 app.include_router(red_flag.router)
 app.include_router(workspace.router)
 
+# Research Chat
+app.include_router(research_chat.router)
+
+
+# ---------------------------------------------------------
+# ROOT
+# ---------------------------------------------------------
+
 @app.get("/")
 def root():
     return {
         "message": "Welcome to Multi-Agent Financial Research System Backend"
     }
 
+
+# ---------------------------------------------------------
+# HEALTH CHECK
+# ---------------------------------------------------------
 
 @app.get("/health")
 def health_check():
