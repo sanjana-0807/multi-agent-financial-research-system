@@ -1,3 +1,4 @@
+import ReportPage from './ReportPage.jsx'
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -297,13 +298,8 @@ const FLAG_CATEGORY_GROUPS = {
 )}
 
       {activeTab === 'report' && (
-        <div className="bg-gradient-to-br from-blue-600 via-indigo-600 to-blue-700 text-white rounded-3xl p-8 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-          <div className="space-y-2">
-            <h3 className="text-lg font-bold">Analyst Research Report</h3>
-            <p className="text-xs text-blue-100 max-w-lg leading-relaxed">Report generation is not available yet.</p>
-          </div>
-        </div>
-      )}
+  <ReportPage />
+)}
     </div>
   )
 }
