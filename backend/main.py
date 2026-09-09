@@ -1,3 +1,4 @@
+from routes import report
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
@@ -43,6 +44,7 @@ app.include_router(documents.router)
 app.include_router(extraction.router)
 app.include_router(red_flag.router)
 app.include_router(workspace.router)
+app.include_router(report.router)
 
 @app.get("/")
 def root():

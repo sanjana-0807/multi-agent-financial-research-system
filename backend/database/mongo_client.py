@@ -1,5 +1,5 @@
 # database/mongo_client.py
-
+from models.report import Report
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 
@@ -38,5 +38,6 @@ async def init_db():
             DocumentModel,
             RedFlagResult,
             Workspace,
+            Report,
         ],
     )
