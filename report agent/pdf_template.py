@@ -7,8 +7,19 @@ from reportlab.platypus import (
     TableStyle
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+
+# Register Arial font for Unicode support, including ₹
+pdfmetrics.registerFont(
+    TTFont("Arial", r"C:\Windows\Fonts\arial.ttf")
+)
+
+pdfmetrics.registerFont(
+    TTFont("Arial-Bold", r"C:\Windows\Fonts\arialbd.ttf")
+)
 
 
 def create_pdf(filename, report_data):
@@ -27,6 +38,7 @@ def create_pdf(filename, report_data):
     title_style = ParagraphStyle(
         "ReportTitle",
         parent=styles["Title"],
+        fontName="Arial-Bold",
         alignment=TA_CENTER,
         fontSize=20,
         spaceAfter=15
@@ -35,9 +47,18 @@ def create_pdf(filename, report_data):
     heading_style = ParagraphStyle(
         "SectionHeading",
         parent=styles["Heading2"],
+        fontName="Arial-Bold",
         fontSize=14,
         spaceBefore=12,
         spaceAfter=8
+    )
+
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["BodyText"],
+        fontName="Arial",
+        fontSize=10,
+        leading=14
     )
 
     content = []
@@ -54,14 +75,14 @@ def create_pdf(filename, report_data):
     content.append(
         Paragraph(
             f"<b>Company:</b> {company}",
-            styles["BodyText"]
+            body_style
         )
     )
 
     content.append(
         Paragraph(
             f"<b>Report Period:</b> {period}",
-            styles["BodyText"]
+            body_style
         )
     )
 
@@ -75,7 +96,7 @@ def create_pdf(filename, report_data):
     content.append(
         Paragraph(
             report_data.get("Executive Summary", ""),
-            styles["BodyText"]
+            body_style
         )
     )
 
@@ -89,7 +110,7 @@ def create_pdf(filename, report_data):
     table_data = [["Financial Metric", "Value"]]
 
     for key, value in financials.items():
-        table_data.append([key, str(value)])
+        table_data.append([str(key), str(value)])
 
     financial_table = Table(
         table_data,
@@ -98,11 +119,9 @@ def create_pdf(filename, report_data):
 
     financial_table.setStyle(
         TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTNAME", (0, 0), (-1, 0), "Arial-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Arial"),
+            ("GRID", (0, 0), (-1, -1), 0.5, "grey"),
             ("PADDING", (0, 0), (-1, -1), 7),
         ])
     )
@@ -113,15 +132,17 @@ def create_pdf(filename, report_data):
     red_flags = report_data.get("Red Flags", [])
 
     if red_flags:
+
         content.append(
             Paragraph("Red Flags", heading_style)
         )
 
         for flag in red_flags:
+
             content.append(
                 Paragraph(
                     f"• {flag}",
-                    styles["BodyText"]
+                    body_style
                 )
             )
 
@@ -129,6 +150,7 @@ def create_pdf(filename, report_data):
     comparison = report_data.get("Comparison", {})
 
     if comparison:
+
         content.append(
             Paragraph("Comparison", heading_style)
         )
@@ -136,18 +158,20 @@ def create_pdf(filename, report_data):
         if isinstance(comparison, dict):
 
             for key, value in comparison.items():
+
                 content.append(
                     Paragraph(
                         f"<b>{key}:</b> {value}",
-                        styles["BodyText"]
+                        body_style
                     )
                 )
 
         else:
+
             content.append(
                 Paragraph(
                     str(comparison),
-                    styles["BodyText"]
+                    body_style
                 )
             )
 
@@ -155,6 +179,7 @@ def create_pdf(filename, report_data):
     outlook = report_data.get("Outlook", "")
 
     if outlook:
+
         content.append(
             Paragraph("Outlook", heading_style)
         )
@@ -162,7 +187,7 @@ def create_pdf(filename, report_data):
         content.append(
             Paragraph(
                 outlook,
-                styles["BodyText"]
+                body_style
             )
         )
 
