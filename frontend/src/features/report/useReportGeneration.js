@@ -11,10 +11,14 @@ function useReportGeneration() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  const isPolling = !!reportId && status !== JOB_STATUS.COMPLETED && status !== JOB_STATUS.FAILED
+  const isPolling =
+    !!reportId &&
+    status !== JOB_STATUS.COMPLETED &&
+    status !== JOB_STATUS.FAILED
 
   const pollStatus = useCallback(async () => {
     if (!reportId) return
+
     try {
       const res = await getReportStatus(reportId)
       setStatus(res.data.status)
@@ -34,16 +38,24 @@ function useReportGeneration() {
 
   usePolling(pollStatus, POLL_INTERVAL, isPolling)
 
-  async function generate(documentId) {
+  async function generate(documentId, comparisonId = null) {
     setError(null)
     setReport(null)
     setStatus(JOB_STATUS.PENDING)
     setLoading(true)
+
     try {
-      const res = await generateReport(documentId)
+      const res = await generateReport(
+        documentId,
+        comparisonId
+      )
+
       setReportId(res.data.report_id)
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to start report generation')
+      setError(
+        err.response?.data?.detail ||
+        'Failed to start report generation'
+      )
       setLoading(false)
     }
   }
@@ -56,7 +68,15 @@ function useReportGeneration() {
     setLoading(false)
   }
 
-  return { generate, reportId, status, report, loading, error, reset }
+  return {
+    generate,
+    reportId,
+    status,
+    report,
+    loading,
+    error,
+    reset,
+  }
 }
 
 export default useReportGeneration

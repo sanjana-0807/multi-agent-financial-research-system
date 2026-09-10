@@ -5,7 +5,7 @@ import ReportExportButton from '../features/report/ReportExportButton.jsx'
 import { FileText, Sparkles } from 'lucide-react'
 import Button from '../components/Button.jsx'
 
-function ReportPage() {
+function ReportPage({ comparisonResult }) {
   const { activeWorkspace, activeDocument, extractionData } = useWorkspace()
 
   const {
@@ -25,9 +25,15 @@ function ReportPage() {
 
   const hasDocument = Boolean(activeDocument?.document_id)
 
+  const hasComparison = Boolean(comparisonResult?.id)
+
   async function handleGenerateReport() {
     if (!activeDocument?.document_id) return
-    await generate(activeDocument.document_id)
+
+    await generate(
+      activeDocument.document_id,
+      comparisonResult?.id || null
+    )
   }
 
   return (
@@ -56,6 +62,18 @@ function ReportPage() {
                 Document: {activeDocument.document_id}
               </p>
             )}
+
+            {hasComparison && (
+              <p className="text-xs text-emerald-600 mt-2">
+                Comparison result ready and will be included in the report.
+              </p>
+            )}
+
+            {!hasComparison && (
+              <p className="text-xs text-slate-400 mt-2">
+                Run a company comparison first to include the Company Comparison section.
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-3">
@@ -78,7 +96,6 @@ function ReportPage() {
           </div>
         </div>
 
-        {/* Status */}
         {loading && (
           <div className="pt-3 border-t border-slate-100 text-sm font-medium text-blue-600">
             Report Agent is generating the report. Please wait...

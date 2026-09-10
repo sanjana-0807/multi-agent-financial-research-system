@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from core.dependencies import get_current_user
 from services.report_service import ReportService
 
 
@@ -10,8 +11,16 @@ router = APIRouter(
 
 
 @router.post("/generate")
-async def generate_report(document_id: str):
-    return await ReportService.generate(document_id)
+async def generate_report(
+    document_id: str,
+    comparison_id: str | None = None,
+    current_user=Depends(get_current_user),
+):
+    return await ReportService.generate(
+        document_id,
+        current_user,
+        comparison_id,
+    )
 
 
 @router.get("/status/{report_id}")

@@ -2,8 +2,12 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
+from beanie import PydanticObjectId
 
 from models.report import Report
+from models.document import DocumentModel
+from models.comparison_result import ComparisonResult
+from models.user import User
 from services.research_service import ResearchService
 from services.pdf_service import PDFService
 
@@ -11,7 +15,11 @@ from services.pdf_service import PDFService
 class ReportService:
 
     @staticmethod
-    async def generate(document_id: str):
+    async def generate(
+        document_id: str,
+        current_user: User,
+        comparison_id: str | None = None,
+    ):
 
         # ---------------------------------------------------------
         # 1. Get Extraction Agent output
@@ -19,7 +27,6 @@ class ReportService:
         extraction = ResearchService.extract(document_id)
 
         # ResearchService returns a dictionary.
-        # Therefore, use dictionary access instead of extraction.company.
         company_name = extraction.get("company", "Unknown")
         fiscal_year = extraction.get("fiscal_year", 0)
 
@@ -51,14 +58,47 @@ class ReportService:
         report_period = f"FY{fiscal_year}"
 
         # ---------------------------------------------------------
-        # 4. Comparison Agent integration point
+        # 4. Get existing Comparison Agent output
         # ---------------------------------------------------------
-        # The Comparison Agent belongs to another team member.
-        # Do not implement or duplicate it here.
-        #
-        # The existing team integration can provide comparison data
-        # through this field later.
         comparison_data = {}
+
+        if comparison_id:
+            try:
+                comparison_object_id = PydanticObjectId(comparison_id)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid comparison_id."
+                )
+
+            comparison_result = await ComparisonResult.get(
+                comparison_object_id
+            )
+
+            if not comparison_result:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Comparison result not found."
+                )
+
+            if comparison_result.status != "completed":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "The selected comparison is not completed. "
+                        "Run the Comparison Agent first."
+                    )
+                )
+
+            comparison_data = comparison_result.model_dump(
+                mode="json"
+            )
+
+            # Include the MongoDB comparison result ID in the
+            # structured report data.
+            comparison_data["id"] = str(
+                comparison_result.id
+            )
 
         # ---------------------------------------------------------
         # 5. Build structured report
@@ -136,13 +176,16 @@ class ReportService:
             await report.save()
 
         except Exception as exc:
-            report.status = "completed"
+            report.status = "failed"
             report.error = f"PDF generation failed: {str(exc)}"
             await report.save()
 
             raise HTTPException(
                 status_code=500,
-                detail=f"Report created, but PDF generation failed: {str(exc)}"
+                detail=(
+                    "Report created, but PDF generation failed: "
+                    f"{str(exc)}"
+                )
             )
 
         # ---------------------------------------------------------

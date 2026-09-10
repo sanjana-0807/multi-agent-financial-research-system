@@ -298,8 +298,8 @@ const FLAG_CATEGORY_GROUPS = {
 )}
 
       {activeTab === 'report' && (
-  <ReportPage />
-)}
+        <ReportPage comparisonResult={comparisonState.result} />
+      )}
     </div>
   )
 }
