@@ -11,6 +11,7 @@ from routes import documents
 from routes import extraction
 from routes import red_flag
 from routes import workspace
+from routes import report
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,6 +44,7 @@ app.include_router(documents.router)
 app.include_router(extraction.router)
 app.include_router(red_flag.router)
 app.include_router(workspace.router)
+app.include_router(report.router)
 
 @app.get("/")
 def root():
