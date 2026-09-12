@@ -1,14 +1,8 @@
 # agents/report_agent/agent.py
-
 import os
 from crewai import Agent, LLM
 
-
-OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL",
-    "http://localhost:11434",
-)
-
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 llm = LLM(
     model="ollama/llama3.2:latest",
     base_url=OLLAMA_BASE_URL,
@@ -17,38 +11,49 @@ llm = LLM(
 
 def create_report_agent():
     """
-    Create the final Report Agent.
+    CrewAI agent scoped ONLY to narrating already-computed report data
+    into an Executive Summary and Outlook.
 
-    The Report Agent receives already-collected evidence from the
-    other agents and produces the final user-facing response.
-
-    It does NOT independently retrieve documents or invent financial
-    numbers.
+    It never sees the raw document, and never sees numbers it could
+    get wrong -- it is handed the finished Key Financials, Red Flags,
+    and Company Comparison sections (already computed deterministically
+    or by other agents) and writes prose around them. This mirrors the
+    same principle agents/comparison_agent/crew.py uses for its
+    narrative step.
     """
-
     return Agent(
-        role="Financial Research Report Analyst",
-
+        role="Financial Report Writer",
         goal=(
-            "Produce a concise, accurate final answer using the supplied "
-            "evidence from the financial research agents and conversation "
-            "context. Preserve document-derived facts, calculations, and "
-            "source citations exactly. Clearly identify any information "
-            "added from general AI/model knowledge."
+            "Write a concise, professional Executive Summary and a "
+            "forward-looking Outlook section for a financial research "
+            "report, based strictly on the financial metrics, red "
+            "flags, and comparison data provided. Never invent a "
+            "number, ratio, ranking, or finding that is not present "
+            "in the provided data."
         ),
-
         backstory=(
-            "You are the final reviewer in a financial research system. "
-            "Other specialized agents have already collected document "
-            "evidence, extracted financial metrics, detected risks, and "
-            "performed company comparisons. Your responsibility is to "
-            "combine those results into one clear answer. You never "
-            "invent financial values and never present model knowledge "
-            "as information obtained from a company document."
+            "You are a financial analyst who writes the narrative "
+            "sections of institutional research reports. You write "
+            "in clear, neutral, professional language suitable for "
+            "investors and executives. You highlight what the data "
+            "actually shows -- strengths, risks, and open questions "
+            "-- without exaggeration or speculation beyond what the "
+            "figures and flags support. If a section's underlying "
+            "data was not available, you say so plainly rather than "
+            "filling the gap with a guess."
         ),
-
         llm=llm,
+        # CrewAI's internal JSON-repair/converter step (triggered when
+        # the LLM's raw output isn't cleanly parseable JSON on the
+        # first try) uses its own default LLM unless explicitly told
+        # otherwise, and defaults to OpenAI even when the agent's own
+        # `llm` is Ollama. Pointing it at the same Ollama model
+        # prevents that internal fallback from ever reaching for a
+        # real OpenAI connection. (Also set OPENAI_API_KEY/API_BASE
+        # env vars to Ollama's OpenAI-compatible endpoint as a second
+        # layer of defense -- see backend/.env.)
+        function_calling_llm=llm,
         verbose=True,
         allow_delegation=False,
-        max_iter=3,
+        max_iter=5,
     )

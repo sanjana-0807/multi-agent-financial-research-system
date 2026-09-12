@@ -26,6 +26,7 @@ services:
       # Optional: persist uploaded PDFs outside the container so they
       # survive a rebuild. Remove if you don't want this.
       - ./backend/documents:/app/documents
+      - ./backend/vectorstore/chroma_data:/app/vectorstore/chroma_data
 
   redis:
     image: redis:7-alpine

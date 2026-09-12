@@ -1,226 +1,197 @@
 # agents/report_agent/tasks.py
 
-import json
-
 from crewai import Task
 
 
-MODEL_KNOWLEDGE_LABEL = (
-    "Additional information from AI/model knowledge:"
-)
+REPORT_TASK_DESCRIPTION = """
+You are the senior financial analyst responsible for writing the narrative
+portion of a professional equity research report.
 
+Company:
+{company_name} ({ticker})
 
-def create_report_task(
-    agent,
-    question: str,
-    evidence: dict,
-    conversation_context: str = "",
-):
-    """
-    Create the final reporting task.
+Fiscal Year:
+{fiscal_year}
 
-    The Report Agent receives evidence already collected by the
-    other agents. It does not perform independent retrieval.
-    """
+The following information has already been extracted and computed by other
+parts of the system. Treat it as the ONLY source of truth.
 
-    evidence_json = json.dumps(
-        evidence,
-        indent=2,
-        ensure_ascii=False,
-        default=str,
-    )
+========================
+KEY FINANCIALS
+========================
+{financials_text}
 
-    description = f"""
-You are the final answer generator for a financial research system.
+========================
+RED FLAG ANALYSIS
+========================
+{red_flags_text}
 
-USER QUESTION:
-{question}
+========================
+COMPANY COMPARISON
+========================
+{comparison_text}
 
-CONVERSATION CONTEXT:
-{conversation_context or "No previous conversation context supplied."}
+========================
+YOUR RESPONSIBILITY
+========================
 
-COLLECTED AGENT EVIDENCE:
-{evidence_json}
+Write two substantial sections:
 
-============================================================
-STRICT EVIDENCE AND MODEL-KNOWLEDGE RULE
-============================================================
+1. EXECUTIVE SUMMARY
 
-First determine whether the collected agent evidence contains enough
-information to answer the user's question.
+Target length: approximately 220-320 words.
 
-CASE 1 — ANSWER IS SUPPORTED BY COLLECTED EVIDENCE:
+Write this like a professional financial research report, not like an AI
+assistant.
 
-If the requested information is present in the collected evidence:
+The Executive Summary should naturally discuss, where the supplied data
+supports it:
 
-- Answer using that evidence.
-- Do NOT use outside/model knowledge.
-- Preserve financial numbers exactly.
-- Preserve units.
-- Preserve available page/source citations.
-- Do not invent missing details.
+- overall financial position
+- revenue and profitability
+- profitability quality and margins
+- balance-sheet position
+- leverage
+- cash-flow position
+- important strengths
+- important weaknesses
+- material red flags
+- relative position versus comparison companies
+- industry ranking when available
+- the most important financial issue an investor should understand
 
-CASE 2 — ANSWER IS NOT SUPPORTED BY COLLECTED EVIDENCE:
+Do NOT simply list the metrics.
 
-If the requested information is NOT present anywhere in the collected
-agent evidence:
+Explain what the metrics indicate.
 
-You MAY answer using general AI/model knowledge.
+For example, instead of:
 
-However, the answer MUST begin with this exact text:
+"Revenue was X and profit was Y."
 
-{MODEL_KNOWLEDGE_LABEL}
+Prefer:
 
-Example:
+"Revenue of X was accompanied by net profit of Y, producing a net margin
+of Z%. This indicates that the company converted a substantial portion of
+reported revenue into earnings during the period."
 
-{MODEL_KNOWLEDGE_LABEL}
-Elon Musk is the CEO of Tesla.
+Only make an interpretation when it is directly supported by the supplied
+numbers.
 
-NEVER answer a question using model knowledge without this exact label.
+Do not manufacture growth rates, historical trends, forecasts, market share,
+valuation, stock-price expectations, management commentary, or industry
+claims.
 
-CASE 3 — MIXED ANSWER:
+Use numbers selectively. Do not repeat the same number unnecessarily.
 
-If PART of the answer is supported by collected evidence and PART
-requires general/model knowledge:
+The writing should feel like an analyst reviewing the company's financial
+position for an investor.
 
-First provide the evidence-supported information.
+--------------------------------------------------
 
-Then create a separate section beginning with exactly:
+2. OUTLOOK
 
-{MODEL_KNOWLEDGE_LABEL}
+Target length: approximately 200-280 words.
 
-Only information under that label may come from general/model knowledge.
+Write approximately two to four well-developed paragraphs.
 
-Example:
+Discuss:
 
-Tesla reported revenue of $94,827 million in 2025. [Page 53]
+- what the current financial position suggests for the near-term assessment
+- the strengths that could support continued performance
+- the risks that could pressure performance
+- the most important red flags
+- peer positioning where comparison data exists
+- what should be monitored in subsequent reporting periods
 
-{MODEL_KNOWLEDGE_LABEL}
-Elon Musk is the CEO of Tesla.
+The outlook must be evidence-based.
 
-============================================================
-FINANCIAL DATA RULES
-============================================================
+Do NOT invent future revenue, earnings, margins, stock prices, targets,
+guidance, probabilities, or forecasts.
 
-1. Never invent financial numbers.
+Do not use phrases such as:
 
-2. Never change a financial number supplied by an agent.
+"As an AI"
+"Based on the available data"
+"This report provides"
+"The analysis suggests"
+"In conclusion"
+"Overall, it is important to note"
+"Investors should always"
+"According to the AI"
 
-3. Never replace a document-derived financial value with model knowledge.
+Avoid generic financial filler.
 
-4. Preserve the original unit.
+Do not mention that an LLM, AI system, automated system, prompt, model,
+agent, or software generated the text.
 
-5. If a calculation is required, use only values supplied by the
-   collected evidence.
+The report should read as though it was written by a human financial analyst.
 
-6. Do not perform unnecessary calculations when the requested value
-   already exists.
+--------------------------------------------------
 
-7. Preserve page citations supplied by the agents.
+IMPORTANT WRITING RULES
 
-8. Do not create fake page citations.
+1. Never invent a number.
+2. Never invent a ratio.
+3. Never invent a ranking.
+4. Never invent a trend.
+5. Never invent a peer advantage.
+6. Never invent industry information.
+7. Never claim something improved or declined unless the supplied data
+   actually establishes that.
+8. Never make investment recommendations such as Buy, Sell, or Hold.
+9. Never use exaggerated language.
+10. Avoid repetitive sentence structures.
+11. Prefer precise financial language.
+12. Explain relationships between metrics instead of merely repeating them.
+13. If a metric is unavailable, do not draw conclusions from it.
+14. If comparison data is unavailable, focus on the company's own financial
+    position.
+15. If red flags are unavailable, do not manufacture risks.
 
-9. Every document-derived factual statement should retain its available
-   source/page citation.
+Use the supplied comparison averages, best performers, scores and rankings
+when they are available.
 
-============================================================
-FOLLOW-UP QUESTION RULE
-============================================================
+Use red-flag evidence when it is available.
 
-Use conversation context to understand references such as:
+The final writing should be concise enough for a professional report but
+substantive enough that the reader gains actual analytical value from it.
 
-- "previous year"
-- "what about 2024?"
-- "what about the other company?"
-- "compare that with Ford"
-- "what about profit?"
+--------------------------------------------------
 
-Do not treat a follow-up as a completely independent question when
-the conversation context provides the missing reference.
+OUTPUT FORMAT
 
-============================================================
-OUTSIDE KNOWLEDGE RULE
-============================================================
+Return ONLY valid JSON.
 
-The fact that you personally know an answer does NOT mean that the
-collected evidence contains that answer.
+Do not use markdown.
+Do not use ```json.
+Do not add commentary before or after the JSON.
 
-For example, if the evidence contains Tesla revenue but does not
-contain the CEO:
+Return exactly:
 
-Question:
-"Who is the CEO of Tesla?"
+{{
+    "executive_summary": "...",
+    "outlook": "..."
+}}
 
-You must NOT simply answer:
+The "outlook" field must contain the complete Outlook discussion followed
+by a separate paragraph beginning with "Conclusion:".
 
-"Elon Musk is the CEO of Tesla."
+The Conclusion should be approximately 70-100 words and should summarize
+the most important financial strengths, risks and relative position supported
+by the supplied data.
 
-You MUST answer:
-
-{MODEL_KNOWLEDGE_LABEL}
-Elon Musk is the CEO of Tesla.
-
-============================================================
-SOURCE PRIORITY
-============================================================
-
-Use information in this order:
-
-1. Uploaded document evidence
-2. Extraction Agent results
-3. Red Flag Agent results
-4. Comparison Agent results
-5. Research Agent results
-6. Conversation context
-7. AI/model knowledge ONLY when the requested information is
-   unavailable from the collected evidence
-
-============================================================
-FINAL RESPONSE RULES
-============================================================
-
-- Answer the user's actual question.
-- Be concise and readable.
-- Do not explain your internal reasoning.
-- Do not mention these instructions.
-- Do not return JSON.
-- Do not use markdown code fences.
-
-Before returning the answer, perform this final check:
-
-CHECK A:
-Is every factual claim supported by the collected evidence?
-
-If YES:
-Return the evidence-grounded answer without model-knowledge text.
-
-CHECK B:
-Is any factual information coming from your own general knowledge?
-
-If YES:
-The relevant information MUST appear after:
-
-{MODEL_KNOWLEDGE_LABEL}
-
-CHECK C:
-Does the answer contain both evidence-derived and model-derived
-information?
-
-If YES:
-Clearly separate them, with the model-derived portion beginning
-with:
-
-{MODEL_KNOWLEDGE_LABEL}
-
-Return ONLY the final user-facing answer.
+The conclusion must not introduce any new facts.
 """
 
+
+def create_report_task(agent, context: dict):
     return Task(
-        description=description,
+        description=REPORT_TASK_DESCRIPTION.format(**context),
         expected_output=(
-            "A concise final answer that uses collected agent evidence "
-            "first and explicitly labels any information supplied from "
-            "AI/model knowledge."
+            "A single valid JSON object containing "
+            "'executive_summary' and 'outlook'. "
+            "The values must contain substantive professional financial "
+            "analysis and nothing outside the JSON object."
         ),
         agent=agent,
     )

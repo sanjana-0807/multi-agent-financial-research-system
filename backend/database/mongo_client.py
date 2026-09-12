@@ -12,6 +12,7 @@ from models.document import DocumentModel
 from models.red_flag import RedFlagResult
 from models.workspace import Workspace
 from models.chat import ChatMessage
+from models.report import Report
 
 client: AsyncIOMotorClient | None = None
 
@@ -40,5 +41,6 @@ async def init_db():
             RedFlagResult,
             Workspace,
             ChatMessage,
+            Report,
         ],
     )
