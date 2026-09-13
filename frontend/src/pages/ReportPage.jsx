@@ -1,115 +1,222 @@
-import { useState } from 'react'
+// frontend/src/pages/ReportPage.jsx
+import { useEffect, useState } from 'react'
+import { FileText, Sparkles, Cpu, GitCompare, Trash2, History, CheckCircle2 } from 'lucide-react'
+import Button from '../components/Button.jsx'
+import Badge from '../components/Badge.jsx'
 import ReportPreview from '../features/report/ReportPreview.jsx'
 import ReportExportButton from '../features/report/ReportExportButton.jsx'
+import useReportGeneration from '../features/report/useReportGeneration.js'
 import { useWorkspace } from '../context/WorkspaceContext.jsx'
-import { formatCurrency } from '../utils/formatCurrency.js'
-import { FileText, CheckSquare, Sparkles } from 'lucide-react'
-import Button from '../components/Button.jsx'
+
+const STATUS_BADGE = {
+  completed: 'success',
+  generating: 'processing',
+  failed: 'danger',
+}
 
 function ReportPage() {
-  const { activeWorkspace, extractionData } = useWorkspace()
+  const { activeWorkspace, companies, activeCompany, selectCompany } = useWorkspace()
 
-  const [includeSummary, setIncludeSummary] = useState(true)
-  const [includeFinancials, setIncludeFinancials] = useState(true)
-  const [includeRedFlags, setIncludeRedFlags] = useState(true)
-  const [includeComparison, setIncludeComparison] = useState(true)
-  const [includeOutlook, setIncludeOutlook] = useState(true)
+  const {
+    report,
+    setReport,
+    reports,
+    availableComparisons,
+    loading,
+    loadingComparisons,
+    error,
+    generate,
+    loadAvailableComparisons,
+    loadReports,
+    removeReport,
+  } = useReportGeneration()
 
-  const company = extractionData?.company || activeWorkspace?.name || 'Company Financial Review'
-  const year = extractionData?.fiscal_year || 2025
-  const rev = extractionData?.revenue ? formatCurrency(extractionData.revenue) : '$8.42B'
-  const netInc = extractionData?.net_profit ? formatCurrency(extractionData.net_profit) : '$742M'
-  const margin = extractionData?.ratios?.net_profit_margin ? `${extractionData.ratios.net_profit_margin}%` : '18.3%'
-  const leverage = extractionData?.ratios?.debt_to_equity ? `${extractionData.ratios.debt_to_equity}×` : '2.1×'
+  const [selectedComparisonIds, setSelectedComparisonIds] = useState([])
 
-  const dynamicReport = {
-    title: `${company} — Comprehensive Financial Analysis Report (FY ${year})`,
-    generated_at: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
-    summary: `${company} demonstrated robust performance in FY ${year}, with total revenue reaching ${rev} and net profit at ${netInc}. Operating margins held at ${margin}, reflecting solid cost discipline, while leverage ratio of ${leverage} indicates balanced capital allocation.`,
-    sections: [
-      includeFinancials && {
-        heading: 'Revenue & Financial Performance',
-        content: `Reported total revenue of ${rev} reflects steady operational execution across core business segments. Net profit margin closed at ${margin}, supported by stable pricing power and controlled SG&A expenses.`
-      },
-      includeFinancials && {
-        heading: 'Profitability & Liquidity Metrics',
-        content: `Net profit reached ${netInc} for the period. Operating cash flow metrics and current liquidity ratios confirm that short-term obligations remain adequately covered without requiring emergency credit lines.`
-      },
-      includeRedFlags && {
-        heading: 'Red Flag & Risk Assessment',
-        content: `Automated risk screening identified moderate margin compression (80 bps contraction) and higher receivables growth relative to top-line expansion. Auditor remarks confirmed an unqualified opinion with no critical going-concern flags.`
-      },
-      includeComparison && {
-        heading: 'Peer Benchmarking & Sector Position',
-        content: `Compared against industry benchmarks, ${company}'s operating margin of ${margin} outperforms the median peer average (14.2%), while maintaining conservative debt-to-equity ratios below 2.5×.`
-      },
-      includeOutlook && {
-        heading: 'Forward Outlook & Analyst Conclusions',
-        content: `Management guidance points toward disciplined capital expenditure and sustained demand. Key monitoring indicators for subsequent quarters include gross margin resilience and receivables turnover acceleration.`
-      }
-    ].filter(Boolean)
+  // Whenever the active company changes, refresh what comparisons could
+  // be included and what reports already exist for it, and clear any
+  // report currently on screen (it belongs to the previous company).
+  useEffect(() => {
+    setReport(null)
+    setSelectedComparisonIds([])
+    if (activeCompany && activeWorkspace) {
+      loadAvailableComparisons(activeCompany.id, activeWorkspace.id)
+      loadReports(activeCompany.id)
+    }
+  }, [activeCompany?.id, activeWorkspace?.id])
+
+  function toggleComparison(comparisonId) {
+    setSelectedComparisonIds((prev) =>
+      prev.includes(comparisonId)
+        ? prev.filter((id) => id !== comparisonId)
+        : [...prev, comparisonId]
+    )
+  }
+
+  async function handleGenerate() {
+    if (!activeWorkspace || !activeCompany) return
+    await generate(activeWorkspace.id, activeCompany.id, selectedComparisonIds)
+  }
+
+  async function handleSwitchCompany(companyId) {
+    const company = companies.find((c) => c.id === companyId)
+    if (company) await selectCompany(company)
+  }
+
+  if (!activeWorkspace) {
+    return (
+      <div className="p-6 md:p-8 max-w-5xl mx-auto">
+        <div className="bg-white rounded-3xl border border-slate-200/80 p-12 text-center shadow-3d-subtle space-y-2">
+          <FileText size={32} className="text-slate-300 mx-auto" />
+          <h3 className="text-lg font-bold text-slate-900">No Active Session</h3>
+          <p className="text-sm text-slate-500">Open or create a workspace before generating a report.</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (companies.length === 0) {
+    return (
+      <div className="p-6 md:p-8 max-w-5xl mx-auto">
+        <div className="bg-white rounded-3xl border border-slate-200/80 p-12 text-center shadow-3d-subtle space-y-2">
+          <FileText size={32} className="text-slate-300 mx-auto" />
+          <h3 className="text-lg font-bold text-slate-900">No Companies Yet</h3>
+          <p className="text-sm text-slate-500">Upload a document for this session before generating a report.</p>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="p-6 md:p-8 max-w-5xl mx-auto space-y-6 animate-fadeIn select-none">
-      {/* Configuration Strip (Hidden on print) */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-3d-subtle space-y-4 no-print">
+      {/* Configuration strip */}
+      <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-3d-subtle space-y-5 no-print">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-600 mb-1">
-              <Sparkles size={14} /> Report Agent Synthesis
+              <Sparkles size={14} /> Report Agent
             </div>
             <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">Executive Research Report</h1>
             <p className="text-sm font-medium text-slate-500 mt-1">
-              Configure and export the 5-section analyst report grounded in your uploaded disclosures.
+              Generates an Executive Summary and Outlook from this company's key financials, red flags,
+              and peer comparisons, and renders a downloadable PDF.
             </p>
           </div>
-          <ReportExportButton reportId="R001" filename={`${company.replace(/\s+/g, '_')}_Financial_Report.pdf`} />
+          {report?.status === 'completed' && (
+            <ReportExportButton reportId={report.id} filename={report.filename} />
+          )}
         </div>
 
-        {/* Section Checkboxes */}
-        <div className="pt-3 border-t border-slate-100 flex flex-wrap gap-4 text-xs font-bold text-slate-700">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeFinancials}
-              onChange={(e) => setIncludeFinancials(e.target.checked)}
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>Key Financials</span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeRedFlags}
-              onChange={(e) => setIncludeRedFlags(e.target.checked)}
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>Red Flags & Risks</span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeComparison}
-              onChange={(e) => setIncludeComparison(e.target.checked)}
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>Peer Comparison</span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeOutlook}
-              onChange={(e) => setIncludeOutlook(e.target.checked)}
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>Strategic Outlook</span>
-          </label>
+        {/* Company selector */}
+        <div className="pt-3 border-t border-slate-100 flex items-center gap-3">
+          <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Company:</span>
+          <select
+            value={activeCompany?.id || ''}
+            onChange={(e) => handleSwitchCompany(e.target.value)}
+            className="text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-700 outline-none"
+          >
+            {companies.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.ticker})
+              </option>
+            ))}
+          </select>
         </div>
+
+        {/* Comparison selection */}
+        <div className="pt-3 border-t border-slate-100 space-y-2">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500 uppercase tracking-wider">
+            <GitCompare size={13} /> Peer Comparisons to Include
+          </div>
+          {loadingComparisons ? (
+            <p className="text-xs text-slate-400">Checking available comparisons&hellip;</p>
+          ) : availableComparisons.length === 0 ? (
+            <p className="text-xs text-slate-400">
+              No completed comparisons involve this company yet. The report will be generated without a peer
+              comparison section.
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400">
+                Leave all unchecked to auto-include every completed comparison for this company.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {availableComparisons.map((c) => {
+                  const isSelected = selectedComparisonIds.includes(c.comparison_id)
+                  return (
+                    <button
+                      key={c.comparison_id}
+                      onClick={() => toggleComparison(c.comparison_id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold transition-colors ${
+                        isSelected
+                          ? 'border-blue-500 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      {isSelected && <CheckCircle2 size={13} />}
+                      {c.tickers.join(' vs ')}
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        <Button
+          onClick={handleGenerate}
+          disabled={!activeCompany || loading}
+          loading={loading}
+          icon={Cpu}
+          variant="primary"
+          size="md"
+          className="w-full"
+        >
+          Generate Report
+        </Button>
+
+        {error && (
+          <p className="text-xs font-semibold text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-200">
+            {error}
+          </p>
+        )}
       </div>
 
-      {/* Printable Report Preview */}
-      <ReportPreview report={dynamicReport} />
+      {/* Report history for this company */}
+      {reports.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-3d-subtle space-y-3 no-print">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500 uppercase tracking-wider">
+            <History size={13} /> Previous Reports
+          </div>
+          <div className="space-y-2">
+            {reports.map((r) => (
+              <div
+                key={r.id}
+                className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border transition-colors ${
+                  report?.id === r.id ? 'border-blue-400 bg-blue-50/40' : 'border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <button onClick={() => setReport(r)} className="flex items-center gap-3 text-left flex-1 min-w-0">
+                  <Badge variant={STATUS_BADGE[r.status] || 'default'}>{r.status}</Badge>
+                  <span className="text-xs font-bold text-slate-800 truncate">
+                    FY {r.fiscal_year || 'N/A'} &middot; {new Date(r.created_at).toLocaleString()}
+                  </span>
+                </button>
+                <button
+                  onClick={() => removeReport(r.id, activeCompany.id)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0"
+                  title="Delete report"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Printable report preview */}
+      <ReportPreview report={report} />
     </div>
   )
 }

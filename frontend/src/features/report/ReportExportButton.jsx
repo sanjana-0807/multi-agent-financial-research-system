@@ -1,10 +1,11 @@
+// frontend/src/features/report/ReportExportButton.jsx
 import { Download } from 'lucide-react'
-import { downloadReport } from '../../api/reportApi.js'
 import { useState } from 'react'
+import { downloadReport } from '../../api/reportApi.js'
 
-// Button that downloads the generated report as a file.
+// Button that downloads the generated report PDF as a file.
 // Handles the blob response and triggers a browser download.
-function ReportExportButton({ reportId, filename = 'financial-report.pdf' }) {
+function ReportExportButton({ reportId, filename = 'financial-report.pdf', disabled = false }) {
   const [downloading, setDownloading] = useState(false)
 
   async function handleDownload() {
@@ -12,7 +13,7 @@ function ReportExportButton({ reportId, filename = 'financial-report.pdf' }) {
     setDownloading(true)
     try {
       const res = await downloadReport(reportId)
-      const url = window.URL.createObjectURL(new Blob([res.data]))
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))
       const link = document.createElement('a')
       link.href = url
       link.setAttribute('download', filename)
@@ -30,7 +31,7 @@ function ReportExportButton({ reportId, filename = 'financial-report.pdf' }) {
   return (
     <button
       onClick={handleDownload}
-      disabled={!reportId || downloading}
+      disabled={!reportId || disabled || downloading}
       className="flex items-center gap-2 bg-blue-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
     >
       <Download size={16} />

@@ -1,62 +1,105 @@
+// frontend/src/features/report/useReportGeneration.js
 import { useState, useCallback } from 'react'
-import { generateReport, getReportStatus } from '../../api/reportApi.js'
-import usePolling from '../../hooks/usePolling.js'
-import { POLL_INTERVAL, JOB_STATUS } from '../../utils/constants.js'
+import {
+  generateReport,
+  getAvailableComparisons,
+  listReportsForCompany,
+  deleteReport as apiDeleteReport,
+} from '../../api/reportApi.js'
 
-// Hook: generate a report → poll status → report ready for preview/download.
+// Hook: load available comparisons for a company -> generate report
+// (synchronous on the backend) -> report ready for preview/download.
+// Also tracks this company's report history so past reports can be
+// reopened without regenerating.
 function useReportGeneration() {
-  const [reportId, setReportId] = useState(null)
-  const [status, setStatus] = useState(null)
   const [report, setReport] = useState(null)
+  const [reports, setReports] = useState([])
+  const [availableComparisons, setAvailableComparisons] = useState([])
+
   const [loading, setLoading] = useState(false)
+  const [loadingComparisons, setLoadingComparisons] = useState(false)
+  const [loadingReports, setLoadingReports] = useState(false)
   const [error, setError] = useState(null)
 
-  const isPolling = !!reportId && status !== JOB_STATUS.COMPLETED && status !== JOB_STATUS.FAILED
-
-  const pollStatus = useCallback(async () => {
-    if (!reportId) return
-    try {
-      const res = await getReportStatus(reportId)
-      setStatus(res.data.status)
-
-      if (res.data.status === JOB_STATUS.COMPLETED) {
-        setReport(res.data.report || res.data)
-        setLoading(false)
-      } else if (res.data.status === JOB_STATUS.FAILED) {
-        setError(res.data.error || 'Report generation failed')
-        setLoading(false)
-      }
-    } catch {
-      setError('Failed to check report status')
-      setLoading(false)
+  const loadAvailableComparisons = useCallback(async (companyId, workspaceId) => {
+    if (!companyId || !workspaceId) {
+      setAvailableComparisons([])
+      return
     }
-  }, [reportId])
+    setLoadingComparisons(true)
+    try {
+      const res = await getAvailableComparisons(companyId, workspaceId)
+      setAvailableComparisons(res.data)
+    } catch {
+      setAvailableComparisons([])
+    } finally {
+      setLoadingComparisons(false)
+    }
+  }, [])
 
-  usePolling(pollStatus, POLL_INTERVAL, isPolling)
+  const loadReports = useCallback(async (companyId) => {
+    if (!companyId) {
+      setReports([])
+      return
+    }
+    setLoadingReports(true)
+    try {
+      const res = await listReportsForCompany(companyId)
+      setReports(res.data)
+    } catch {
+      setReports([])
+    } finally {
+      setLoadingReports(false)
+    }
+  }, [])
 
-  async function generate(documentId) {
+  async function generate(workspaceId, companyId, comparisonIds) {
+    if (!workspaceId || !companyId) return null
     setError(null)
-    setReport(null)
-    setStatus(JOB_STATUS.PENDING)
     setLoading(true)
     try {
-      const res = await generateReport(documentId)
-      setReportId(res.data.report_id)
+      const res = await generateReport({ workspaceId, companyId, comparisonIds })
+      setReport(res.data)
+      await loadReports(companyId)
+      return res.data
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to start report generation')
+      setError(err.response?.data?.detail || 'Failed to generate report')
+      return null
+    } finally {
       setLoading(false)
+    }
+  }
+
+  async function removeReport(reportId, companyId) {
+    try {
+      await apiDeleteReport(reportId)
+      setReport((current) => (current?.id === reportId ? null : current))
+      await loadReports(companyId)
+    } catch {
+      setError('Failed to delete report')
     }
   }
 
   function reset() {
-    setReportId(null)
-    setStatus(null)
     setReport(null)
     setError(null)
-    setLoading(false)
   }
 
-  return { generate, reportId, status, report, loading, error, reset }
+  return {
+    report,
+    setReport,
+    reports,
+    availableComparisons,
+    loading,
+    loadingComparisons,
+    loadingReports,
+    error,
+    generate,
+    loadAvailableComparisons,
+    loadReports,
+    removeReport,
+    reset,
+  }
 }
 
 export default useReportGeneration

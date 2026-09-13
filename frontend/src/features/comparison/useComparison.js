@@ -1,40 +1,69 @@
 import { useState } from 'react'
-import { compareCompanies, getComparisonResult } from '../../api/comparisonApi.js'
+import {
+  runComparison as runComparisonApi,
+  getComparison,
+} from '../../api/comparisonApi.js'
 
-// Hook for managing comparison workflow:
-// select documents → submit comparison → get results.
 function useComparison() {
   const [selectedIds, setSelectedIds] = useState([])
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(false)
   const [error, setError] = useState(null)
 
   function toggleDocument(documentId) {
     setSelectedIds((prev) =>
       prev.includes(documentId)
         ? prev.filter((id) => id !== documentId)
-        : [...prev, documentId]
+        : prev.length < 2
+          ? [...prev, documentId]
+          : [prev[1], documentId]
     )
   }
 
-  async function runComparison() {
-    if (selectedIds.length < 2) return
+  async function runComparison(workspaceId) {
+    if (!workspaceId || selectedIds.length !== 2) return null
+
     setLoading(true)
     setError(null)
+
     try {
-      const res = await compareCompanies(selectedIds)
-      // If the backend returns results directly
-      if (res.data.companies || res.data.results) {
-        setResult(res.data)
-      } else if (res.data.comparison_id) {
-        // If async — fetch the result
-        const resultRes = await getComparisonResult(res.data.comparison_id)
-        setResult(resultRes.data)
-      }
+      const res = await runComparisonApi(workspaceId, selectedIds)
+      setResult(res.data)
+      return res.data
     } catch (err) {
-      setError(err.response?.data?.detail || 'Comparison failed')
+      setError(
+        err.response?.data?.detail ||
+          'Comparison failed — make sure both companies have a processed document.'
+      )
+      return null
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function loadComparison(comparisonId) {
+    if (!comparisonId) return null
+
+    setLoadingHistory(true)
+    setError(null)
+
+    try {
+      const res = await getComparison(comparisonId)
+      setResult(res.data)
+
+      // A saved comparison determines the companies currently displayed.
+      setSelectedIds(res.data.company_ids || [])
+
+      return res.data
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+          'Failed to load the saved comparison.'
+      )
+      return null
+    } finally {
+      setLoadingHistory(false)
     }
   }
 
@@ -44,7 +73,17 @@ function useComparison() {
     setError(null)
   }
 
-  return { selectedIds, toggleDocument, runComparison, result, loading, error, reset }
+  return {
+    selectedIds,
+    toggleDocument,
+    runComparison,
+    loadComparison,
+    result,
+    loading,
+    loadingHistory,
+    error,
+    reset,
+  }
 }
 
 export default useComparison

@@ -14,11 +14,14 @@ class ChatMessage(Document):
 
     content: str
 
+    sources: list[dict] = Field(
+        default_factory=list
+    )
+
     created_at: datetime = Field(
         default_factory=lambda:
             datetime.now(timezone.utc)
     )
 
     class Settings:
-
         name = "chat_messages"

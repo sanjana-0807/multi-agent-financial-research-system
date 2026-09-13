@@ -34,6 +34,34 @@ async def ask_research(
     )
 
 
+# ============================================================
+# CHAT HISTORY
+# ============================================================
+
+@router.get(
+    "/conversations/{document_id}",
+)
+async def get_conversations(
+    document_id: str,
+):
+    return await ResearchService.get_conversations(
+        document_id=document_id,
+    )
+
+
+@router.get(
+    "/conversations/{conversation_id}/messages",
+)
+async def get_conversation_messages(
+    conversation_id: str,
+    document_id: str,
+):
+    return await ResearchService.get_conversation_messages(
+        conversation_id=conversation_id,
+        document_id=document_id,
+    )
+
+
 @router.post("/extract")
 def extract(
     request: ExtractRequest,

@@ -3,13 +3,22 @@ import { useNavigate } from 'react-router-dom'
 import {
   Sparkles, Upload, FileText, ShieldCheck, Inbox, Plus, Layers,
   TrendingUp, TrendingDown, AlertTriangle, Maximize2, X, Scale, CheckSquare, Building2, Check,
-  GitCompare, Trophy, Cpu, CheckCircle2, ArrowRight
+  GitCompare, Trophy, Cpu, CheckCircle2, ArrowRight, History, Trash2, Loader2
 } from 'lucide-react'
 import Button from '../components/Button.jsx'
+import Badge from '../components/Badge.jsx'
 import { useWorkspace } from '../context/WorkspaceContext.jsx'
 import { formatCurrency } from '../utils/formatCurrency.js'
 import { getLatestDocumentForCompany } from '../api/documentsApi.js'
-import { runComparison } from '../api/comparisonApi.js'
+import { runComparison, getComparison, listComparisons } from '../api/comparisonApi.js'
+import {
+  generateReport,
+  getAvailableComparisons,
+  listReportsForCompany,
+  deleteReport as apiDeleteReport,
+} from '../api/reportApi.js'
+import ReportPreview from '../features/report/ReportPreview.jsx'
+import ReportExportButton from '../features/report/ReportExportButton.jsx'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
 function WorkspaceDetailPage() {
@@ -21,6 +30,13 @@ function WorkspaceDetailPage() {
   const [comparisonState, setComparisonState] = useState({
   companyAId: '', companyBId: '', result: null, compareError: null
 })
+  // Lifted the same way as comparisonState: the Report tab unmounts when
+  // you switch to another tab, so the last generated report and the
+  // comparison selections need to live here, not inside ReportTab itself.
+  const [reportState, setReportState] = useState({
+    report: null,
+    selectedComparisonIds: [],
+  })
   const navigate = useNavigate()
 
   const hasData = Boolean(extractionData && extractionData.revenue)
@@ -297,12 +313,15 @@ const FLAG_CATEGORY_GROUPS = {
 )}
 
       {activeTab === 'report' && (
-        <div className="bg-gradient-to-br from-blue-600 via-indigo-600 to-blue-700 text-white rounded-3xl p-8 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-          <div className="space-y-2">
-            <h3 className="text-lg font-bold">Analyst Research Report</h3>
-            <p className="text-xs text-blue-100 max-w-lg leading-relaxed">Report generation is not available yet.</p>
-          </div>
-        </div>
+        <ReportTab
+          workspace={activeWorkspace}
+          companies={companies}
+          activeCompany={activeCompany}
+          onSelectCompany={(c) => selectCompany(c)}
+          reportState={reportState}
+          setReportState={setReportState}
+          onGoToComparison={() => setActiveTab('comparison')}
+        />
       )}
     </div>
   )
@@ -653,15 +672,16 @@ function ScoreRing({ percent, color, size = 72, strokeWidth = 7 }) {
     </svg>
   )
 }
-// Comparison Agent tab — dropdown company pickers (instead of a card
-// grid, to save vertical space) plus a lightweight bar-chart visual
-// for the ratio comparison, alongside the exact-value table.
-// Comparison Agent tab — dropdown company pickers (instead of a card
-// grid, to save vertical space) plus recharts bar charts for the
-// ratio comparison, alongside the exact-value table.
+// Comparison Agent tab — keeps the existing comparison logic/results,
+// while adding persistent comparison history. Selecting a history item
+// loads the saved result instead of running the Comparison Agent again.
 function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, setComparisonState }) {
   const { companyAId, companyBId, result, compareError } = comparisonState
   const [comparing, setComparing] = useState(false)
+  const [history, setHistory] = useState([])
+  const [loadingHistory, setLoadingHistory] = useState(true)
+  const [historyError, setHistoryError] = useState(null)
+  const [loadingComparisonId, setLoadingComparisonId] = useState(null)
 
   const canCompare = companyAId && companyBId && companyAId !== companyBId
 
@@ -673,36 +693,131 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
     setComparisonState((prev) => ({ ...prev, companyBId: id, result: null, compareError: null }))
   }
 
+  async function loadHistory() {
+    if (!workspace) {
+      setHistory([])
+      setLoadingHistory(false)
+      return
+    }
+
+    setLoadingHistory(true)
+    setHistoryError(null)
+
+    try {
+      const res = await listComparisons(0, 50)
+      const workspaceCompanyIds = new Set(companies.map((c) => String(c.id)))
+
+      const filtered = (res.data || [])
+        .filter((item) => {
+          const ids = item.company_ids || []
+          return ids.length > 0 && ids.every((id) => workspaceCompanyIds.has(String(id)))
+        })
+        .sort((a, b) => {
+          const dateA = new Date(a.completed_at || a.created_at || 0).getTime()
+          const dateB = new Date(b.completed_at || b.created_at || 0).getTime()
+          return dateB - dateA
+        })
+
+      setHistory(filtered)
+    } catch (err) {
+      setHistory([])
+      setHistoryError(
+        err.response?.data?.detail ||
+          'Unable to load comparison history.'
+      )
+    } finally {
+      setLoadingHistory(false)
+    }
+  }
+
+  useEffect(() => {
+    loadHistory()
+  }, [workspace?.id, companies])
+
+  async function handleSelectHistory(item) {
+    const comparisonId = item.comparison_id || item.id
+
+    if (!comparisonId) return
+
+    setLoadingComparisonId(comparisonId)
+    setComparisonState((prev) => ({ ...prev, compareError: null }))
+
+    try {
+      const res = await getComparison(comparisonId)
+      const saved = res.data
+
+      const ids = saved.company_ids || item.company_ids || []
+      setComparisonState((prev) => ({
+        ...prev,
+        companyAId: ids[0] ? String(ids[0]) : '',
+        companyBId: ids[1] ? String(ids[1]) : '',
+        result: saved,
+        compareError: null,
+      }))
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      const message = Array.isArray(detail)
+        ? detail.map((d) => d.msg).join('; ')
+        : (typeof detail === 'string' ? detail : 'Failed to load comparison history item.')
+
+      setComparisonState((prev) => ({ ...prev, compareError: message }))
+    } finally {
+      setLoadingComparisonId(null)
+    }
+  }
+
+  function handleNewComparison() {
+    setComparisonState({
+      companyAId: '',
+      companyBId: '',
+      result: null,
+      compareError: null,
+    })
+  }
+
   async function handleRunComparison() {
     if (!workspace || !canCompare) return
     setComparing(true)
     setComparisonState((prev) => ({ ...prev, compareError: null }))
+
     try {
       const res = await runComparison(workspace.id, [companyAId, companyBId])
       setComparisonState((prev) => ({ ...prev, result: res.data }))
+      await loadHistory()
     } catch (err) {
-      setComparisonState((prev) => ({
-        ...prev,
-        compareError: err.response?.data?.detail || 'Comparison failed — make sure both companies have a processed document.'
-      }))
+      const detail = err.response?.data?.detail
+      const message = Array.isArray(detail)
+        ? detail.map((d) => d.msg).join('; ')
+        : (typeof detail === 'string' ? detail : 'Comparison failed — make sure both companies have a processed document.')
+      setComparisonState((prev) => ({ ...prev, compareError: message }))
     } finally {
       setComparing(false)
     }
   }
 
+  function formatComparisonTime(value) {
+    if (!value) return '—'
+    const parsed = new Date(value)
+    return isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString()
+  }
+
+  function historyId(item) {
+    return item.comparison_id || item.id
+  }
+
   if (companies.length < 2) {
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200/80 p-10 text-center space-y-4 shadow-3d-subtle">
-      <GitCompare size={28} className="mx-auto text-slate-300" />
-      <div>
-        <h3 className="text-base font-bold text-slate-900">Add a second company to compare</h3>
-        <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1.5">
-          This workspace currently has only {companies.length} compan{companies.length === 1 ? 'y' : 'ies'}. Use the "Add Document" button above to add another company before running a comparison.
-        </p>
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-10 text-center space-y-4 shadow-3d-subtle">
+        <GitCompare size={28} className="mx-auto text-slate-300" />
+        <div>
+          <h3 className="text-base font-bold text-slate-900">Add a second company to compare</h3>
+          <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1.5">
+            This workspace currently has only {companies.length} compan{companies.length === 1 ? 'y' : 'ies'}. Use the "Add Document" button above to add another company before running a comparison.
+          </p>
+        </div>
       </div>
-    </div>
-  )
-}
+    )
+  }
 
   let tickers = []
   let financialRows = []
@@ -710,228 +825,653 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
   const colors = ['#2563eb', '#10b981']
 
   if (result) {
-  tickers = Object.keys(result.ratio_comparisons[0]?.values || {})
-  // Split by magnitude so currency-scale metrics (revenue, assets...) go to
-  // the bar chart, and ratio-scale metrics (EPS, debt-to-equity...) go to
-  // KPI cards instead — they're different units and shouldn't share an axis.
-  const isRatioScale = (row) => Math.max(...tickers.map((t) => Math.abs(Number(row.values[t]) || 0))) < 100
-  const financialMetricRows = result.ratio_comparisons.filter((row) => !isRatioScale(row))
-  ratioMetricRows = result.ratio_comparisons.filter((row) => isRatioScale(row))
-  financialRows = financialMetricRows.map((row) => {
-    const entry = { name: row.ratio_name }
-    tickers.forEach((t) => { entry[t] = Number(row.values[t]) })
-    return entry
-  })
-}
+    tickers = Object.keys(result.ratio_comparisons[0]?.values || {})
+    const isRatioScale = (row) => Math.max(...tickers.map((t) => Math.abs(Number(row.values[t]) || 0))) < 100
+    const financialMetricRows = result.ratio_comparisons.filter((row) => !isRatioScale(row))
+    ratioMetricRows = result.ratio_comparisons.filter((row) => isRatioScale(row))
+    financialRows = financialMetricRows.map((row) => {
+      const entry = { name: row.ratio_name }
+      tickers.forEach((t) => { entry[t] = Number(row.values[t]) })
+      return entry
+    })
+  }
 
   return (
-    <div className="space-y-6">
-      <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
-        <div>
-  <h3 className="text-base font-bold text-slate-900">Select Two Companies</h3>
-  <p className="text-xs text-slate-500 mt-0.5">Choose two companies from this workspace to benchmark.</p>
-</div>
+    <div className="grid grid-cols-1 lg:grid-cols-[270px_minmax(0,1fr)] gap-5 items-start">
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Company A</label>
-            <select
-              value={companyAId}
-              onChange={(e) => handleChangeA(e.target.value)}
-              className="w-full mt-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800"
-            >
-              <option value="">Select a company…</option>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id} disabled={c.id === companyBId}>
-                  {c.name} ({c.ticker})
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Company B</label>
-            <select
-              value={companyBId}
-              onChange={(e) => handleChangeB(e.target.value)}
-              className="w-full mt-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800"
-            >
-              <option value="">Select a company…</option>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id} disabled={c.id === companyAId}>
-                  {c.name} ({c.ticker})
-                </option>
-              ))}
-            </select>
+      {/* ============================================================
+          COMPARISON HISTORY
+      ============================================================= */}
+      <aside className="bg-white rounded-2xl border border-slate-200/80 shadow-3d-subtle overflow-hidden lg:sticky lg:top-5 lg:h-[calc(100vh-180px)] flex flex-col min-h-[300px]">
+
+        <div className="p-4 border-b border-slate-100 flex-shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+                <History size={15} />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold text-slate-900">Comparison History</h3>
+                <p className="text-[9px] text-slate-400 mt-0.5">Saved comparisons</p>
+              </div>
+            </div>
+            <span className="text-[9px] font-bold text-slate-400 bg-slate-50 border border-slate-100 px-2 py-1 rounded-full">
+              {history.length}
+            </span>
           </div>
         </div>
 
+        <div className="flex-1 min-h-0 overflow-y-auto p-2.5 space-y-2">
+          {loadingHistory ? (
+            <div className="py-10 text-center">
+              <Loader2 size={18} className="mx-auto text-blue-500 animate-spin" />
+              <p className="text-[10px] text-slate-400 mt-2">Loading history...</p>
+            </div>
+          ) : historyError ? (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200">
+              <p className="text-[10px] font-semibold text-rose-600">{historyError}</p>
+            </div>
+          ) : history.length === 0 ? (
+            <div className="py-10 px-3 text-center">
+              <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center mx-auto mb-2.5">
+                <History size={17} />
+              </div>
+              <p className="text-[10px] font-bold text-slate-600">No comparison history</p>
+              <p className="text-[9px] text-slate-400 mt-1 leading-relaxed">
+                Completed comparisons will appear here.
+              </p>
+            </div>
+          ) : (
+            history.map((item) => {
+              const itemId = historyId(item)
+              const isActive = result && (
+                (result.comparison_id && result.comparison_id === itemId) ||
+                (result.id && result.id === itemId)
+              )
+              const tickersLabel = (item.tickers || []).join(' vs ') || 'Comparison'
+              const itemDate = item.completed_at || item.created_at
+
+              return (
+                <button
+                  key={itemId}
+                  type="button"
+                  onClick={() => handleSelectHistory(item)}
+                  disabled={loadingComparisonId === itemId}
+                  className={`w-full text-left p-3 rounded-xl border transition-all ${
+                    isActive
+                      ? 'border-blue-400 bg-blue-50/70 shadow-sm'
+                      : 'border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                      isActive ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'
+                    }`}>
+                      {loadingComparisonId === itemId
+                        ? <Loader2 size={13} className="animate-spin" />
+                        : <GitCompare size={13} />
+                      }
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`text-[10px] font-extrabold truncate ${
+                          isActive ? 'text-blue-700' : 'text-slate-800'
+                        }`}>
+                          {tickersLabel}
+                        </span>
+                      </div>
+
+                      <p className="text-[9px] text-slate-400 mt-1">
+                        {formatComparisonTime(itemDate)}
+                      </p>
+
+                      <div className="flex items-center gap-1.5 mt-1.5">
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          item.status === 'completed' ? 'bg-emerald-500' : 'bg-amber-500'
+                        }`} />
+                        <span className={`text-[8px] font-bold uppercase ${
+                          item.status === 'completed' ? 'text-emerald-600' : 'text-amber-600'
+                        }`}>
+                          {item.status || 'saved'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              )
+            })
+          )}
+        </div>
+
+        {/* Pinned footer — stays visible while history grows */}
+        <div className="p-3 border-t border-slate-100 bg-slate-50/70 flex-shrink-0">
+          <button
+            type="button"
+            onClick={handleNewComparison}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            <Plus size={14} />
+            New Comparison
+          </button>
+        </div>
+      </aside>
+
+      {/* ============================================================
+          CURRENT COMPARISON AREA
+      ============================================================= */}
+      <main className="min-w-0 space-y-6">
+
+        {/* Selection header */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                {result ? 'Saved Comparison' : 'Select Two Companies'}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {result
+                  ? 'Viewing a previously generated comparison. No new agent run is performed.'
+                  : 'Choose two companies from this workspace to benchmark.'
+                }
+              </p>
+            </div>
+
+            {result && (
+              <button
+                type="button"
+                onClick={handleNewComparison}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 bg-white text-[11px] font-bold text-slate-600 hover:border-blue-300 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+              >
+                <Plus size={13} />
+                New Comparison
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Company A</label>
+              <select
+                value={companyAId}
+                onChange={(e) => handleChangeA(e.target.value)}
+                className="w-full mt-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800"
+              >
+                <option value="">Select a company…</option>
+                {companies.map((c) => (
+                  <option key={c.id} value={c.id} disabled={c.id === companyBId}>
+                    {c.name} ({c.ticker})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Company B</label>
+              <select
+                value={companyBId}
+                onChange={(e) => handleChangeB(e.target.value)}
+                className="w-full mt-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800"
+              >
+                <option value="">Select a company…</option>
+                {companies.map((c) => (
+                  <option key={c.id} value={c.id} disabled={c.id === companyAId}>
+                    {c.name} ({c.ticker})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {!result && (
+            <Button
+              onClick={handleRunComparison}
+              disabled={!canCompare || comparing}
+              loading={comparing}
+              icon={Cpu}
+              variant="primary"
+              size="md"
+              className="w-full"
+            >
+              Compare Selected Companies
+            </Button>
+          )}
+
+          {compareError && (
+            <p className="text-xs font-semibold text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-200">{compareError}</p>
+          )}
+        </div>
+
+        {result && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center font-bold">
+                  <Trophy size={18} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Industry Rankings</h3>
+                  <p className="text-xs text-slate-500">{result.summary}</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                {result.industry_rankings.map((r) => {
+                  const maxScore = Math.max(...result.industry_rankings.map((x) => x.score))
+                  const pct = maxScore > 0 ? (r.score / maxScore) * 100 : 0
+                  const ringColor = r.rank === 1 ? '#f59e0b' : '#94a3b8'
+                  return (
+                    <div key={r.ticker} className={`p-4 rounded-xl border flex items-center gap-4 ${
+                      r.rank === 1 ? 'bg-amber-50/60 border-amber-300' : 'bg-white border-slate-200/80'
+                    }`}>
+                      <div className="relative flex-shrink-0">
+                        <ScoreRing percent={pct} color={ringColor} />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <span className="text-sm font-black text-slate-800">{r.score}</span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className={`inline-flex w-7 h-7 rounded-lg items-center justify-center font-black text-xs mb-1 ${
+                          r.rank === 1 ? 'bg-amber-500 text-white' : 'bg-slate-300 text-slate-700'
+                        }`}>
+                          #{r.rank}
+                        </div>
+                        <h4 className="text-xs font-extrabold text-slate-900">{r.ticker}</h4>
+                        <span className="text-[10px] font-semibold text-slate-400">Score: {r.score}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {financialRows.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
+                <h3 className="text-base font-bold text-slate-900">Financial Metrics Comparison</h3>
+                <ResponsiveContainer width="100%" height={Math.max(220, financialRows.length * 70)}>
+                  <BarChart data={financialRows} layout="vertical" margin={{ top: 8, right: 32, left: 8, bottom: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => v.toLocaleString()} />
+                    <YAxis type="category" dataKey="name" width={110} tick={{ fontSize: 11, fontWeight: 600, fill: '#334155' }} />
+                    <Tooltip formatter={(v) => v.toLocaleString()} contentStyle={{ fontSize: 12, borderRadius: 10, border: '1px solid #e2e8f0' }} />
+                    <Legend wrapperStyle={{ fontSize: 11, fontWeight: 600 }} />
+                    {tickers.map((t, i) => (
+                      <Bar key={t} dataKey={t} name={t} fill={colors[i % colors.length]} radius={[0, 6, 6, 0]} barSize={16} animationDuration={800} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {ratioMetricRows.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
+                <h3 className="text-base font-bold text-slate-900">Ratio Metrics Comparison</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  {ratioMetricRows.map((row) => {
+                    const [tickerA, tickerB] = tickers
+                    const valA = Number(row.values[tickerA])
+                    const valB = Number(row.values[tickerB])
+                    const best = row.best_performer
+                    const smaller = Math.min(Math.abs(valA), Math.abs(valB))
+                    const larger = Math.max(Math.abs(valA), Math.abs(valB))
+                    const deltaPct = smaller > 0 ? ((larger - smaller) / smaller * 100).toFixed(1) : null
+
+                    return (
+                      <div key={row.ratio_name} className="rounded-xl border border-slate-200 p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-700">{row.ratio_name}</span>
+                          <span className="text-[10px] font-bold text-emerald-600 uppercase">Best: {best}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          {tickers.map((t) => {
+                            const isBest = t === best
+                            const rawVal = row.values[t]
+                            const numVal = Number(rawVal)
+                            const displayVal = !isNaN(numVal) ? numVal.toFixed(2) : rawVal
+                            return (
+                              <div
+                                key={t}
+                                title={String(rawVal)}
+                                className={`rounded-lg p-3 text-center border ${
+                                  isBest ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-100'
+                                }`}
+                              >
+                                <div className="text-[10px] font-bold text-slate-500">{t}</div>
+                                <div className={`text-base font-extrabold mt-0.5 truncate ${isBest ? 'text-emerald-700' : 'text-slate-700'}`}>
+                                  {displayVal}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {deltaPct && (
+                          <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-emerald-600">
+                            <TrendingUp size={12} />
+                            <span>{best} leads by {deltaPct}%</span>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle">
+              <h3 className="text-base font-bold text-slate-900 mb-4">Ratio Comparison — Table</h3>
+              <table className="w-full text-xs text-left">
+                <thead className="text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2 pr-4">Metric</th>
+                    {tickers.map((ticker) => (
+                      <th key={ticker} className="py-2 pr-4">{ticker}</th>
+                    ))}
+                    <th className="py-2">Best</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {result.ratio_comparisons.map((row) => (
+                    <tr key={row.ratio_name}>
+                      <td className="py-2 pr-4 font-semibold text-slate-800">{row.ratio_name}</td>
+                      {Object.entries(row.values).map(([ticker, val]) => (
+                        <td key={ticker} className="py-2 pr-4">{val}</td>
+                      ))}
+                      <td className="py-2 font-bold text-emerald-600">{row.best_performer}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex justify-end">
+              <Button
+                onClick={handleNewComparison}
+                variant="outline"
+                size="sm"
+              >
+                New Comparison
+              </Button>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  )
+}
+
+// Normalizes a report's created_at timestamp for display. Backend
+// stores created_at as an aware UTC datetime (see models/report.py,
+// datetime.now(timezone.utc)), so a correctly serialized value already
+// carries an offset ("...+00:00") or a "Z" suffix and `new Date(...)`
+// parses it as UTC natively. This guard only kicks in for the case
+// where a value reaches the client without that offset/Z (e.g. an
+// older record, or a serialization layer that stripped it) — in that
+// case `new Date(...)` would otherwise silently treat it as local
+// time and shift it by the browser's UTC offset.
+function formatReportTime(createdAt) {
+  if (!createdAt) return '—'
+  const hasOffset = /[zZ]|[+-]\d{2}:?\d{2}$/.test(createdAt)
+  const iso = hasOffset ? createdAt : `${createdAt}Z`
+  const parsed = new Date(iso)
+  return isNaN(parsed.getTime()) ? '—' : parsed.toLocaleString()
+}
+
+// Report Agent tab — mirrors the ComparisonTab pattern: the generated
+// report and the chosen comparison ids live in reportState, lifted to
+// the parent so they survive switching to another tab and back. The
+// available-comparisons list and this company's report history are
+// refetched fresh every time the tab mounts (same idea as DocumentTab's
+// statusByCompany), since they're cheap reads that should stay current.
+// A company switcher lives here too, so the user can change which
+// company they're generating a report for without leaving the tab —
+// switching re-triggers the effect below via activeCompany?.id and the
+// existing displayedReport guard keeps a stale report from a previous
+// company from showing while the new company's data loads.
+function ReportTab({ workspace, companies, activeCompany, onSelectCompany, reportState, setReportState, onGoToComparison }) {
+  const { report, selectedComparisonIds } = reportState
+  const [availableComparisons, setAvailableComparisons] = useState([])
+  const [reports, setReports] = useState([])
+  const [loadingComparisons, setLoadingComparisons] = useState(true)
+  const [loadingReports, setLoadingReports] = useState(true)
+  const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadAvailableComparisons() {
+      if (!activeCompany || !workspace) {
+        setAvailableComparisons([])
+        setLoadingComparisons(false)
+        return
+      }
+      setLoadingComparisons(true)
+      try {
+        const res = await getAvailableComparisons(activeCompany.id, workspace.id)
+        if (!cancelled) setAvailableComparisons(res.data)
+      } catch {
+        if (!cancelled) setAvailableComparisons([])
+      } finally {
+        if (!cancelled) setLoadingComparisons(false)
+      }
+    }
+
+    async function loadReports() {
+      if (!activeCompany) {
+        setReports([])
+        setLoadingReports(false)
+        return
+      }
+      setLoadingReports(true)
+      try {
+        const res = await listReportsForCompany(activeCompany.id)
+        if (!cancelled) setReports(res.data)
+      } catch {
+        if (!cancelled) setReports([])
+      } finally {
+        if (!cancelled) setLoadingReports(false)
+      }
+    }
+
+    loadAvailableComparisons()
+    loadReports()
+    return () => { cancelled = true }
+  }, [activeCompany?.id, workspace?.id])
+
+  function toggleComparison(comparisonId) {
+    setReportState((prev) => ({
+      ...prev,
+      selectedComparisonIds: prev.selectedComparisonIds.includes(comparisonId)
+        ? prev.selectedComparisonIds.filter((id) => id !== comparisonId)
+        : [...prev.selectedComparisonIds, comparisonId],
+    }))
+  }
+
+  async function handleGenerate() {
+    if (!workspace || !activeCompany) return
+    setGenerating(true)
+    setError(null)
+    try {
+      const payload = { workspaceId: workspace.id, companyId: activeCompany.id }
+      if (selectedComparisonIds.length > 0) payload.comparisonIds = selectedComparisonIds
+      const res = await generateReport(payload)
+      setReportState((prev) => ({ ...prev, report: res.data }))
+      const listRes = await listReportsForCompany(activeCompany.id)
+      setReports(listRes.data)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      const message = Array.isArray(detail)
+        ? detail.map((d) => d.msg).join('; ')
+        : (typeof detail === 'string' ? detail : 'Failed to generate report')
+      setError(message)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  async function handleDelete(reportId) {
+    try {
+      await apiDeleteReport(reportId)
+      setReportState((prev) => (prev.report?.id === reportId ? { ...prev, report: null } : prev))
+      const listRes = await listReportsForCompany(activeCompany.id)
+      setReports(listRes.data)
+    } catch {
+      setError('Failed to delete report')
+    }
+  }
+
+  if (!activeCompany) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-10 text-center space-y-4 shadow-3d-subtle">
+        <FileText size={28} className="mx-auto text-slate-300" />
+        <div>
+          <h3 className="text-base font-bold text-slate-900">No company selected</h3>
+          <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1.5">
+            Pick a company from the Document Agent tab before generating a report.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // A report belongs to a specific company_id. If the user switched
+  // companies since the last generation, don't show a stale report.
+  const displayedReport = report && report.company_id === activeCompany.id ? report : null
+
+  return (
+    <div className="space-y-6">
+      {companies.length > 1 && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-3d-subtle flex items-center gap-3">
+          <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide whitespace-nowrap">
+            Company
+          </label>
+          <select
+            value={activeCompany.id}
+            onChange={(e) => {
+              const next = companies.find((c) => c.id === e.target.value)
+              if (next) onSelectCompany(next)
+            }}
+            className="flex-1 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-800"
+          >
+            {companies.map((c) => (
+              <option key={c.id} value={c.id}>{c.name} ({c.ticker})</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-900">Generate Analyst Report</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              For {activeCompany.name} ({activeCompany.ticker}) — combines Key Financials, Red Flag findings and
+              Peer Comparison data into an Executive Summary, Outlook, and downloadable PDF.
+            </p>
+          </div>
+          {displayedReport?.status === 'completed' && (
+            <ReportExportButton reportId={displayedReport.id} filename={displayedReport.filename} />
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+            <GitCompare size={13} /> Peer Comparisons to Include
+          </div>
+          {loadingComparisons ? (
+            <p className="text-xs text-slate-400">Checking available comparisons…</p>
+          ) : availableComparisons.length === 0 ? (
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">
+                No completed comparisons involve this company yet. The report will still generate without a peer
+                comparison section.
+              </p>
+              {onGoToComparison && (
+                <button onClick={onGoToComparison} className="text-[11px] font-bold text-blue-600 hover:underline whitespace-nowrap">
+                  Run a comparison →
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400">Leave all unchecked to auto-include every completed comparison.</p>
+              <div className="flex flex-wrap gap-2">
+                {availableComparisons.map((c) => {
+                  const isSelected = selectedComparisonIds.includes(c.comparison_id)
+                  return (
+                    <button
+                      key={c.comparison_id}
+                      onClick={() => toggleComparison(c.comparison_id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold transition-colors ${
+                        isSelected
+                          ? 'border-blue-500 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      {isSelected && <CheckCircle2 size={13} />}
+                      {c.tickers.join(' vs ')}
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
         <Button
-          onClick={handleRunComparison}
-          disabled={!canCompare || comparing}
-          loading={comparing}
+          onClick={handleGenerate}
+          disabled={generating}
+          loading={generating}
           icon={Cpu}
           variant="primary"
           size="md"
           className="w-full"
         >
-          Compare Selected Companies
+          Generate Report
         </Button>
-        {compareError && (
-          <p className="text-xs font-semibold text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-200">{compareError}</p>
+
+        {error && (
+          <p className="text-xs font-semibold text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-200">{error}</p>
         )}
       </div>
 
-      {result && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center font-bold">
-                <Trophy size={18} />
+      {!loadingReports && reports.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-3d-subtle space-y-3">
+          <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 uppercase tracking-wide">
+            <History size={13} /> Previous Reports
+          </div>
+          <div className="space-y-2">
+            {reports.map((r) => (
+              <div
+                key={r.id}
+                className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border transition-colors ${
+                  displayedReport?.id === r.id ? 'border-blue-400 bg-blue-50/40' : 'border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <button
+                  onClick={() => setReportState((prev) => ({ ...prev, report: r }))}
+                  className="flex items-center gap-3 text-left flex-1 min-w-0"
+                >
+                  <Badge variant={r.status === 'completed' ? 'success' : r.status === 'failed' ? 'danger' : 'processing'}>
+                    {r.status}
+                  </Badge>
+                  <span className="text-xs font-bold text-slate-800 truncate">
+                    FY {r.fiscal_year || 'N/A'} · {formatReportTime(r.created_at)}
+                  </span>
+                </button>
+                <button
+                  onClick={() => handleDelete(r.id)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors flex-shrink-0"
+                  title="Delete report"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Industry Rankings</h3>
-                <p className="text-xs text-slate-500">{result.summary}</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-  {result.industry_rankings.map((r) => {
-    const maxScore = Math.max(...result.industry_rankings.map((x) => x.score))
-    const pct = maxScore > 0 ? (r.score / maxScore) * 100 : 0
-    const ringColor = r.rank === 1 ? '#f59e0b' : '#94a3b8'
-    return (
-      <div key={r.ticker} className={`p-4 rounded-xl border flex items-center gap-4 ${
-        r.rank === 1 ? 'bg-amber-50/60 border-amber-300' : 'bg-white border-slate-200/80'
-      }`}>
-        <div className="relative flex-shrink-0">
-          <ScoreRing percent={pct} color={ringColor} />
-          <div className="absolute inset-0 flex items-center justify-center">
-            <span className="text-sm font-black text-slate-800">{r.score}</span>
-          </div>
-        </div>
-        <div>
-          <div className={`inline-flex w-7 h-7 rounded-lg items-center justify-center font-black text-xs mb-1 ${
-            r.rank === 1 ? 'bg-amber-500 text-white' : 'bg-slate-300 text-slate-700'
-          }`}>
-            #{r.rank}
-          </div>
-          <h4 className="text-xs font-extrabold text-slate-900">{r.ticker}</h4>
-          <span className="text-[10px] font-semibold text-slate-400">Score: {r.score}</span>
-        </div>
-      </div>
-    )
-  })}
-</div>
-          </div>
-
-          {financialRows.length > 0 && (
-            <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
-              <h3 className="text-base font-bold text-slate-900">Financial Metrics Comparison</h3>
-              <ResponsiveContainer width="100%" height={Math.max(220, financialRows.length * 70)}>
-                <BarChart data={financialRows} layout="vertical" margin={{ top: 8, right: 32, left: 8, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => v.toLocaleString()} />
-                  <YAxis type="category" dataKey="name" width={110} tick={{ fontSize: 11, fontWeight: 600, fill: '#334155' }} />
-                  <Tooltip formatter={(v) => v.toLocaleString()} contentStyle={{ fontSize: 12, borderRadius: 10, border: '1px solid #e2e8f0' }} />
-                  <Legend wrapperStyle={{ fontSize: 11, fontWeight: 600 }} />
-                  {tickers.map((t, i) => (
-                    <Bar key={t} dataKey={t} name={t} fill={colors[i % colors.length]} radius={[0, 6, 6, 0]} barSize={16} animationDuration={800} />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {ratioMetricRows.length > 0 && (
-  <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-4">
-    <h3 className="text-base font-bold text-slate-900">Ratio Metrics Comparison</h3>
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-      {ratioMetricRows.map((row) => {
-        const [tickerA, tickerB] = tickers
-        const valA = Number(row.values[tickerA])
-        const valB = Number(row.values[tickerB])
-        const best = row.best_performer
-        const smaller = Math.min(Math.abs(valA), Math.abs(valB))
-        const larger = Math.max(Math.abs(valA), Math.abs(valB))
-        const deltaPct = smaller > 0 ? ((larger - smaller) / smaller * 100).toFixed(1) : null
-
-        return (
-          <div key={row.ratio_name} className="rounded-xl border border-slate-200 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-700">{row.ratio_name}</span>
-              <span className="text-[10px] font-bold text-emerald-600 uppercase">Best: {best}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-  {tickers.map((t) => {
-    const isBest = t === best
-    const rawVal = row.values[t]
-    const numVal = Number(rawVal)
-    const displayVal = !isNaN(numVal) ? numVal.toFixed(2) : rawVal
-    return (
-      <div
-        key={t}
-        title={String(rawVal)}
-        className={`rounded-lg p-3 text-center border ${
-          isBest ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-100'
-        }`}
-      >
-        <div className="text-[10px] font-bold text-slate-500">{t}</div>
-        <div className={`text-base font-extrabold mt-0.5 truncate ${isBest ? 'text-emerald-700' : 'text-slate-700'}`}>
-          {displayVal}
-        </div>
-      </div>
-    )
-  })}
-</div>
-            {deltaPct && (
-              <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-emerald-600">
-                <TrendingUp size={12} />
-                <span>{best} leads by {deltaPct}%</span>
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  </div>
-)}
-
-          <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle">
-            <h3 className="text-base font-bold text-slate-900 mb-4">Ratio Comparison — Table</h3>
-            <table className="w-full text-xs text-left">
-              <thead className="text-slate-500 border-b border-slate-200">
-                <tr>
-                  <th className="py-2 pr-4">Metric</th>
-                  {tickers.map((ticker) => (
-                    <th key={ticker} className="py-2 pr-4">{ticker}</th>
-                  ))}
-                  <th className="py-2">Best</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {result.ratio_comparisons.map((row) => (
-                  <tr key={row.ratio_name}>
-                    <td className="py-2 pr-4 font-semibold text-slate-800">{row.ratio_name}</td>
-                    {Object.entries(row.values).map(([ticker, val]) => (
-                      <td key={ticker} className="py-2 pr-4">{val}</td>
-                    ))}
-                    <td className="py-2 font-bold text-emerald-600">{row.best_performer}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="flex justify-end">
-            <Button
-  onClick={() => setComparisonState({ companyAId: '', companyBId: '', result: null, compareError: null })}
-  variant="outline"
-  size="sm"
->
-  Run Again
-</Button>
+            ))}
           </div>
         </div>
       )}
+
+      <ReportPreview report={displayedReport} />
     </div>
   )
 }

@@ -1315,6 +1315,7 @@ async def _save_chat_message(
     document_id: str,
     role: str,
     content: str,
+    sources: list[dict] | None = None,
 ):
 
     await ChatMessage(
@@ -1322,6 +1323,7 @@ async def _save_chat_message(
         document_id=document_id,
         role=role,
         content=content,
+        sources=sources or [],
     ).insert()
 
 
@@ -1597,6 +1599,12 @@ class ResearchService:
                     document_id,
                     "assistant",
                     answer,
+                    sources=_document_sources(
+                        [
+                            old_source,
+                            new_source,
+                        ]
+                    ),
                 )
 
                 return {
@@ -1822,6 +1830,9 @@ class ResearchService:
                         document_id,
                         "assistant",
                         answer,
+                        sources=_document_sources(
+                            [direct_source]
+                        ),
                     )
 
                     return {
@@ -2204,25 +2215,7 @@ IMPORTANT RULES:
             )
 
         # ====================================================
-        # 19. SAVE CHAT
-        # ====================================================
-
-        await _save_chat_message(
-            conversation_id,
-            document_id,
-            "user",
-            question,
-        )
-
-        await _save_chat_message(
-            conversation_id,
-            document_id,
-            "assistant",
-            answer,
-        )
-
-        # ====================================================
-        # 20. SOURCES
+        # 19. SOURCES
         # ====================================================
 
         sources = []
@@ -2240,6 +2233,25 @@ IMPORTANT RULES:
         )
 
         # ====================================================
+        # 20. SAVE CHAT
+        # ====================================================
+
+        await _save_chat_message(
+            conversation_id,
+            document_id,
+            "user",
+            question,
+        )
+
+        await _save_chat_message(
+            conversation_id,
+            document_id,
+            "assistant",
+            answer,
+            sources=sources,
+        )
+
+        # ====================================================
         # 21. RESPONSE
         # ====================================================
 
@@ -2250,6 +2262,156 @@ IMPORTANT RULES:
             "conversation_id": conversation_id,
             "sources": sources,
         }
+
+    # ========================================================
+    # CONVERSATION HISTORY
+    # ========================================================
+
+    @staticmethod
+    async def get_conversations(
+        document_id: str,
+    ):
+        document_id = _clean(document_id)
+
+        if not document_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Document ID is required.",
+            )
+
+        # Get all messages for this document.
+        messages = await ChatMessage.find(
+            ChatMessage.document_id == document_id
+        ).sort(
+            "+created_at"
+        ).to_list()
+
+        conversations = {}
+
+        for message in messages:
+
+            conversation_id = message.conversation_id
+
+            if conversation_id not in conversations:
+                conversations[conversation_id] = {
+                    "conversation_id": conversation_id,
+                    "document_id": document_id,
+                    "messages": [],
+                    "created_at": message.created_at,
+                    "updated_at": message.created_at,
+                }
+
+            conversation = conversations[conversation_id]
+
+            conversation["messages"].append({
+                "role": message.role,
+                "content": message.content,
+                "sources": getattr(
+                    message,
+                    "sources",
+                    [],
+                ) or [],
+                "created_at": message.created_at,
+            })
+
+            conversation["updated_at"] = message.created_at
+
+        # Create a useful title from the first user question.
+        result = []
+
+        for conversation in conversations.values():
+
+            title = "New Chat"
+
+            for message in conversation["messages"]:
+                if message["role"] == "user":
+                    title = message["content"].strip()
+
+                    if len(title) > 60:
+                        title = title[:60].rstrip() + "..."
+
+                    break
+
+            result.append({
+                "conversation_id": conversation[
+                    "conversation_id"
+                ],
+                "document_id": conversation[
+                    "document_id"
+                ],
+                "title": title,
+                "created_at": conversation[
+                    "created_at"
+                ],
+                "updated_at": conversation[
+                    "updated_at"
+                ],
+            })
+
+        # Newest conversation first.
+        result.sort(
+            key=lambda item: item["updated_at"],
+            reverse=True,
+        )
+
+        return {
+            "document_id": document_id,
+            "conversations": result,
+        }
+
+
+    @staticmethod
+    async def get_conversation_messages(
+        conversation_id: str,
+        document_id: str,
+    ):
+        conversation_id = _clean(
+            conversation_id
+        )
+
+        document_id = _clean(
+            document_id
+        )
+
+        if not conversation_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Conversation ID is required.",
+            )
+
+        if not document_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Document ID is required.",
+            )
+
+        messages = await ChatMessage.find(
+            {
+                "conversation_id": conversation_id,
+                "document_id": document_id,
+            }
+        ).sort(
+            "+created_at"
+        ).to_list()
+
+        return {
+            "conversation_id": conversation_id,
+            "document_id": document_id,
+            "messages": [
+                {
+                    "role": message.role,
+                    "content": message.content,
+                    "sources": getattr(
+                        message,
+                        "sources",
+                        [],
+                    ) or [],
+                    "created_at": message.created_at,
+                }
+                for message in messages
+            ],
+        }
+
 
     # ========================================================
     # LEGACY ENDPOINTS
