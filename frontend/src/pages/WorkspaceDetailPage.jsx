@@ -9,7 +9,6 @@ import Button from '../components/Button.jsx'
 import Badge from '../components/Badge.jsx'
 import { useWorkspace } from '../context/WorkspaceContext.jsx'
 import { formatCurrency } from '../utils/formatCurrency.js'
-import { getLatestDocumentForCompany } from '../api/documentsApi.js'
 import { runComparison, getComparison, listComparisons } from '../api/comparisonApi.js'
 import {
   generateReport,
@@ -139,6 +138,7 @@ const FLAG_CATEGORY_GROUPS = {
       opMargin={opMargin} currentRatio={currentRatio} debtEq={debtEq}
       companies={companies}
       activeCompany={activeCompany}
+      activeDocument={activeDocument}
       onSelectCompany={(c) => selectCompany(c)}
       onGoToFlags={() => setActiveTab('flags')}
       onGoToDocument={() => setActiveTab('document')}
@@ -152,6 +152,7 @@ const FLAG_CATEGORY_GROUPS = {
         <DocumentTab
           companies={companies}
           activeCompany={activeCompany}
+          activeDocument={activeDocument}
           onSelectCompany={(c) => { selectCompany(c); setActiveTab('overview') }}
           onAddDocument={() => navigate('/upload')}
         />
@@ -347,32 +348,22 @@ function EmptyTabState({ title, desc, onUpload }) {
 // Document Agent tab — lists every company in the workspace with its
 // document status, lets the user click into any of them to view its
 // overview, and offers a button to add a new document/company.
-function DocumentTab({ companies, activeCompany, onSelectCompany, onAddDocument }) {
+function DocumentTab({ companies, activeCompany, activeDocument, onSelectCompany, onAddDocument }) {
   const [statusByCompany, setStatusByCompany] = useState({})
-  const [loadingStatus, setLoadingStatus] = useState(true)
 
+  // Reuse the document loaded by WorkspaceContext. This avoids
+  // duplicate requests for every company and prevents request loops.
   useEffect(() => {
-    let cancelled = false
-    async function loadStatuses() {
-      setLoadingStatus(true)
-      const results = {}
-      for (const c of companies) {
-        try {
-          const res = await getLatestDocumentForCompany(c.id)
-          results[c.id] = res.data
-        } catch {
-          results[c.id] = null
-        }
-      }
-      if (!cancelled) {
-        setStatusByCompany(results)
-        setLoadingStatus(false)
-      }
+    if (!activeCompany) {
+      setStatusByCompany({})
+      return
     }
-    if (companies.length > 0) loadStatuses()
-    else setLoadingStatus(false)
-    return () => { cancelled = true }
-  }, [companies])
+
+    setStatusByCompany((prev) => ({
+      ...prev,
+      [activeCompany.id]: activeDocument || null,
+    }))
+  }, [activeCompany, activeDocument])
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-5">
@@ -386,8 +377,6 @@ function DocumentTab({ companies, activeCompany, onSelectCompany, onAddDocument 
           <Building2 size={28} className="mx-auto text-slate-300" />
           <p className="text-xs text-slate-400">No companies in this session yet.</p>
         </div>
-      ) : loadingStatus ? (
-        <div className="text-center py-10 text-xs text-slate-400">Loading document status...</div>
       ) : (
         <div className="space-y-2">
           {companies.map((c) => {
@@ -408,7 +397,9 @@ function DocumentTab({ companies, activeCompany, onSelectCompany, onAddDocument 
                   </div>
                   <div>
                     <div className="text-xs font-bold text-slate-900">{c.name} <span className="text-slate-400 font-semibold">({c.ticker})</span></div>
-                    <div className="text-[10px] text-slate-400 mt-0.5">{doc?.filename || 'No document uploaded'}</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {doc?.filename || (isSelected ? 'No document uploaded' : 'Select company to view document')}
+                    </div>
                   </div>
                 </div>
                 {doc ? (
@@ -416,7 +407,9 @@ function DocumentTab({ companies, activeCompany, onSelectCompany, onAddDocument 
                     <Check size={11} /> {doc.status}
                   </span>
                 ) : (
-                  <span className="text-[10px] font-semibold text-slate-400">No document</span>
+                  <span className="text-[10px] font-semibold text-slate-400">
+                    {isSelected ? 'No document' : 'Not loaded'}
+                  </span>
                 )}
               </button>
             )
@@ -434,27 +427,23 @@ function DocumentTab({ companies, activeCompany, onSelectCompany, onAddDocument 
 function OverviewTab({
   extractionData, overallRisk, flags, currentDoc,
   rev, netInc, totalAssets, totalLiab, cashFlow, epsVal, opMargin, currentRatio, debtEq,
-  companies, activeCompany, onSelectCompany, onGoToFlags, onGoToDocument, onGoToComparison, onUpload
+  companies, activeCompany, activeDocument, onSelectCompany, onGoToFlags, onGoToDocument, onGoToComparison, onUpload
 }) {
   const [statusByCompany, setStatusByCompany] = useState({})
 
+  // Reuse the document loaded by WorkspaceContext. This avoids
+  // duplicate latest-document requests for every company.
   useEffect(() => {
-    let cancelled = false
-    async function loadStatuses() {
-      const results = {}
-      for (const c of companies) {
-        try {
-          const res = await getLatestDocumentForCompany(c.id)
-          results[c.id] = res.data
-        } catch {
-          results[c.id] = null
-        }
-      }
-      if (!cancelled) setStatusByCompany(results)
+    if (!activeCompany) {
+      setStatusByCompany({})
+      return
     }
-    if (companies.length > 0) loadStatuses()
-    return () => { cancelled = true }
-  }, [companies])
+
+    setStatusByCompany((prev) => ({
+      ...prev,
+      [activeCompany.id]: activeDocument || null,
+    }))
+  }, [activeCompany, activeDocument])
 
   // 1. Executive summary — one sentence combining risk + standout ratios.
   const company = extractionData?.company || 'This company'
@@ -489,10 +478,17 @@ function OverviewTab({
       action: onGoToComparison, actionLabel: 'Go to Comparison Agent'
     })
   }
-  const missingDocCount = companies.filter((c) => statusByCompany[c.id] === null).length
-  if (missingDocCount > 0) {
+  // Only report a missing document after the active company has been
+  // checked by WorkspaceContext. Other companies are intentionally not
+  // fetched from this tab just to populate the overview.
+  const activeCompanyHasNoDocument =
+    activeCompany &&
+    Object.prototype.hasOwnProperty.call(statusByCompany, activeCompany.id) &&
+    statusByCompany[activeCompany.id] === null
+
+  if (activeCompanyHasNoDocument) {
     nextSteps.push({
-      text: `${missingDocCount} compan${missingDocCount === 1 ? 'y has' : 'ies have'} no document uploaded yet.`,
+      text: `${activeCompany.name} has no document uploaded yet.`,
       action: onGoToDocument, actionLabel: 'Go to Document Agent'
     })
   }

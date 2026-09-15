@@ -1,6 +1,10 @@
-import { createContext, useContext, useState, useEffect } from 'react'
+import { createContext, useContext, useState, useEffect, useRef } from 'react'
 import { AuthContext } from '../features/auth/AuthContext.jsx'
-import { listWorkspaces, createWorkspace as apiCreateWorkspace, deleteWorkspace as apiDeleteWorkspace } from '../api/workspaceApi.js'
+import {
+  listWorkspaces,
+  createWorkspace as apiCreateWorkspace,
+  deleteWorkspace as apiDeleteWorkspace,
+} from '../api/workspaceApi.js'
 import { createCompany, listCompanies } from '../api/companiesApi.js'
 import { getLatestDocumentForCompany } from '../api/documentsApi.js'
 import { getExtraction } from '../api/extractionApi.js'
@@ -14,14 +18,30 @@ export function WorkspaceProvider({ children }) {
 
   const [sessions, setSessions] = useState([])
   const [sessionsLoading, setSessionsLoading] = useState(false)
+
   const [activeWorkspace, setActiveWorkspaceState] = useState(null)
-  const [companies, setCompanies] = useState([])       // all companies in active workspace
-  const [activeCompany, setActiveCompany] = useState(null) // company whose data is currently shown
+  const [companies, setCompanies] = useState([])
+  const [activeCompany, setActiveCompany] = useState(null)
   const [activeDocument, setActiveDocument] = useState(null)
   const [extractionData, setExtractionDataState] = useState(null)
   const [redFlagData, setRedFlagData] = useState(null)
 
-  // Reset everything on logout / user change
+  /*
+   * Prevent duplicate workspace/company loading.
+   *
+   * This is important because the dashboard/sidebar can both attempt
+   * to activate the same workspace while React is rendering.
+   */
+  const workspaceLoadRef = useRef(null)
+  const loadedWorkspaceIdRef = useRef(null)
+
+  const companyLoadRef = useRef(null)
+  const loadedCompanyIdRef = useRef(null)
+
+  // ---------------------------------------------------------
+  // RESET ON LOGOUT
+  // ---------------------------------------------------------
+
   useEffect(() => {
     if (!isAuthenticated) {
       setSessions([])
@@ -31,67 +51,102 @@ export function WorkspaceProvider({ children }) {
       setActiveDocument(null)
       setExtractionDataState(null)
       setRedFlagData(null)
+
+      workspaceLoadRef.current = null
+      loadedWorkspaceIdRef.current = null
+      companyLoadRef.current = null
+      loadedCompanyIdRef.current = null
     }
   }, [isAuthenticated])
 
+  // ---------------------------------------------------------
+  // SESSIONS / WORKSPACES
+  // ---------------------------------------------------------
+
   async function refreshSessions() {
     setSessionsLoading(true)
+
     try {
       const res = await listWorkspaces()
       setSessions(res.data)
+      return res.data
     } finally {
       setSessionsLoading(false)
     }
   }
 
   useEffect(() => {
-    if (isAuthenticated) refreshSessions()
+    if (isAuthenticated) {
+      refreshSessions()
+    }
   }, [isAuthenticated])
 
-  // Creates a workspace only. Companies are added separately, inside
-  // the workspace, right before a document is uploaded.
   async function createSession({ name, description, objective }) {
-    const wsRes = await apiCreateWorkspace({ name, description, objective })
+    const wsRes = await apiCreateWorkspace({
+      name,
+      description,
+      objective,
+    })
+
     const workspace = wsRes.data
+
     await refreshSessions()
+
     setActiveWorkspaceState(workspace)
     setCompanies([])
     setActiveCompany(null)
     setActiveDocument(null)
     setExtractionDataState(null)
     setRedFlagData(null)
+
+    workspaceLoadRef.current = null
+    loadedWorkspaceIdRef.current = workspace.id || workspace._id || null
+    companyLoadRef.current = null
+    loadedCompanyIdRef.current = null
+
     return { workspace }
   }
 
   async function deleteSession(workspaceId) {
     await apiDeleteWorkspace(workspaceId)
+
     await refreshSessions()
-    if (activeWorkspace?.id === workspaceId) {
+
+    if (String(activeWorkspace?.id) === String(workspaceId)) {
       setActiveWorkspaceState(null)
       setCompanies([])
       setActiveCompany(null)
       setActiveDocument(null)
       setExtractionDataState(null)
       setRedFlagData(null)
+
+      workspaceLoadRef.current = null
+      loadedWorkspaceIdRef.current = null
+      companyLoadRef.current = null
+      loadedCompanyIdRef.current = null
     }
   }
 
-  // Re-fetches the company list for the active workspace. Call this
-  // after adding a company or uploading a document so every tab
-  // (Document, Comparison) sees the same up-to-date list instead of
-  // each maintaining its own stale copy.
+  // ---------------------------------------------------------
+  // COMPANIES
+  // ---------------------------------------------------------
+
   async function refreshCompanies() {
     if (!activeWorkspace) return []
+
     const res = await listCompanies(activeWorkspace.id)
-    setCompanies(res.data)
-    return res.data
+    const companyList = res.data || []
+
+    setCompanies(companyList)
+
+    return companyList
   }
 
-  // Adds a company to the currently active workspace. Used inline on
-  // the Upload page (first company) and now also reused for peer
-  // companies added for comparison.
   async function addCompany({ name, ticker, industry, sector }) {
-    if (!activeWorkspace) throw new Error('No active workspace')
+    if (!activeWorkspace) {
+      throw new Error('No active workspace')
+    }
+
     const res = await createCompany({
       workspace_id: activeWorkspace.id,
       name,
@@ -99,112 +154,375 @@ export function WorkspaceProvider({ children }) {
       industry,
       sector,
     })
+
     const company = res.data
-    setCompanies((prev) => [...prev, company])
-    if (!activeCompany) setActiveCompany(company)
+
+    setCompanies((prev) => {
+      const exists = prev.some(
+        (item) => String(item.id) === String(company.id)
+      )
+
+      if (exists) {
+        return prev
+      }
+
+      return [...prev, company]
+    })
+
+    if (!activeCompany) {
+      setActiveCompany(company)
+    }
+
     return company
   }
 
-  // Fetches and loads a specific company's latest document, extraction,
-  // and red-flag results into state. Returns true if a processed
-  // document was found. This is the single source of truth used both
-  // when opening a workspace (primary company) and when a user picks a
-  // different company to view (e.g. from the Document tab).
-  async function loadDataForCompany(company) {
+  // ---------------------------------------------------------
+  // LOAD COMPANY DATA
+  // ---------------------------------------------------------
+
+  async function loadDataForCompany(company, force = false) {
+    if (!company) {
+      setActiveCompany(null)
+      setActiveDocument(null)
+      setExtractionDataState(null)
+      setRedFlagData(null)
+
+      companyLoadRef.current = null
+      loadedCompanyIdRef.current = null
+
+      return false
+    }
+
+    const companyId = String(company.id)
+
+    /*
+     * If this exact company is already loaded and we are not
+     * explicitly forcing a refresh, do nothing.
+     */
+    if (
+      !force &&
+      loadedCompanyIdRef.current === companyId &&
+      companyLoadRef.current === null
+    ) {
+      setActiveCompany(company)
+      return Boolean(activeDocument)
+    }
+
+    /*
+     * If the same company is already being loaded, reuse the
+     * existing promise instead of firing another API chain.
+     */
+    if (
+      !force &&
+      companyLoadRef.current?.companyId === companyId
+    ) {
+      return companyLoadRef.current.promise
+    }
+
     setActiveCompany(company)
     setActiveDocument(null)
     setExtractionDataState(null)
     setRedFlagData(null)
 
-    if (!company) return false
+    const promise = (async () => {
+      try {
+        const docRes = await getLatestDocumentForCompany(companyId)
+        const doc = docRes.data
 
-    try {
-      const docRes = await getLatestDocumentForCompany(company.id)
-      const doc = docRes.data
-      setActiveDocument(doc)
+        setActiveDocument(doc)
 
-      if (doc.status === 'indexed' || doc.status === 'completed') {
-        try {
-          const extractionRes = await getExtraction(doc.document_id)
-          setExtractionDataState(extractionRes.data)
-        } catch {}
-        try {
-  const flagsRes = await getRedFlagsForDocument(doc.document_id)
-  // GET /red-flags/document/{id} returns a list (unlike POST /run,
-  // which returns a single object) — unwrap it and take the latest.
-  const flagsList = Array.isArray(flagsRes.data) ? flagsRes.data : [flagsRes.data]
-  setRedFlagData(flagsList.length > 0 ? flagsList[flagsList.length - 1] : null)
-} catch {}
+        if (
+          doc.status !== 'indexed' &&
+          doc.status !== 'completed'
+        ) {
+          loadedCompanyIdRef.current = companyId
+          return false
+        }
+
+        /*
+         * Extraction and red flags are independent.
+         * Run them in parallel to reduce loading time.
+         */
+        const [extractionResult, flagsResult] =
+          await Promise.allSettled([
+            getExtraction(doc.document_id),
+            getRedFlagsForDocument(doc.document_id),
+          ])
+
+        // -----------------------------
+        // Extraction
+        // -----------------------------
+
+        if (extractionResult.status === 'fulfilled') {
+          setExtractionDataState(
+            extractionResult.value.data
+          )
+        } else {
+          setExtractionDataState(null)
+        }
+
+        // -----------------------------
+        // Red flags
+        // -----------------------------
+
+        if (flagsResult.status === 'fulfilled') {
+          const rawFlags = flagsResult.value.data
+
+          const flagsList = Array.isArray(rawFlags)
+            ? rawFlags
+            : rawFlags
+              ? [rawFlags]
+              : []
+
+          setRedFlagData(
+            flagsList.length > 0
+              ? flagsList[flagsList.length - 1]
+              : null
+          )
+        } else {
+          setRedFlagData(null)
+        }
+
+        loadedCompanyIdRef.current = companyId
+
         return true
+      } catch (error) {
+        console.error(
+          `Failed to load data for company ${companyId}:`,
+          error
+        )
+
+        setActiveDocument(null)
+        setExtractionDataState(null)
+        setRedFlagData(null)
+
+        return false
+      } finally {
+        /*
+         * Only clear the ref if this is still the same request.
+         */
+        if (
+          companyLoadRef.current?.companyId === companyId
+        ) {
+          companyLoadRef.current = null
+        }
       }
-      return false
-    } catch {
-      setActiveDocument(null)
-      return false
+    })()
+
+    companyLoadRef.current = {
+      companyId,
+      promise,
     }
+
+    return promise
   }
 
-  // Switches which company's document/extraction/red-flag data is
-  // shown as "active", fetching it fresh. Used by the Upload page's
-  // company switcher and the Document tab's "view this company" click.
+  // ---------------------------------------------------------
+  // SELECT COMPANY
+  // ---------------------------------------------------------
+
   async function selectCompany(company) {
+    if (!company) {
+      return loadDataForCompany(null)
+    }
+
+    /*
+     * Selecting the company that is already active should not
+     * refetch the document/extraction/red flags.
+     */
+    if (
+      activeCompany &&
+      String(activeCompany.id) === String(company.id) &&
+      loadedCompanyIdRef.current === String(company.id) &&
+      companyLoadRef.current === null
+    ) {
+      return true
+    }
+
     return loadDataForCompany(company)
   }
 
-  // Opens an existing workspace: loads its companies, picks the first
-  // as "active", and pulls its latest processed document + results if
-  // one exists. Returns true if that primary company has processed data.
+  // ---------------------------------------------------------
+  // OPEN WORKSPACE
+  // ---------------------------------------------------------
+
   async function setActiveWorkspace(workspace) {
+    if (!workspace) {
+      setActiveWorkspaceState(null)
+      setCompanies([])
+      setActiveCompany(null)
+      setActiveDocument(null)
+      setExtractionDataState(null)
+      setRedFlagData(null)
+
+      workspaceLoadRef.current = null
+      loadedWorkspaceIdRef.current = null
+      companyLoadRef.current = null
+      loadedCompanyIdRef.current = null
+
+      return false
+    }
+
+    const workspaceId = String(
+      workspace.id || workspace._id
+    )
+
+    /*
+     * IMPORTANT:
+     * If this workspace is already active and completely loaded,
+     * do not run listCompanies() again.
+     */
+    if (
+      loadedWorkspaceIdRef.current === workspaceId &&
+      workspaceLoadRef.current === null
+    ) {
+      setActiveWorkspaceState(workspace)
+
+      if (companies.length > 0) {
+        const currentCompany =
+          companies.find(
+            (company) =>
+              String(company.id) ===
+              String(activeCompany?.id)
+          ) || companies[0]
+
+        if (
+          currentCompany &&
+          loadedCompanyIdRef.current !==
+            String(currentCompany.id)
+        ) {
+          return loadDataForCompany(currentCompany)
+        }
+
+        return Boolean(activeDocument)
+      }
+
+      return false
+    }
+
+    /*
+     * If the workspace is already being loaded, reuse that
+     * request instead of starting another one.
+     */
+    if (
+      workspaceLoadRef.current?.workspaceId === workspaceId
+    ) {
+      return workspaceLoadRef.current.promise
+    }
+
     setActiveWorkspaceState(workspace)
+
+    setCompanies([])
+    setActiveCompany(null)
     setActiveDocument(null)
     setExtractionDataState(null)
     setRedFlagData(null)
 
-    if (!workspace) {
-      setCompanies([])
-      setActiveCompany(null)
-      return false
+    loadedWorkspaceIdRef.current = null
+    loadedCompanyIdRef.current = null
+    companyLoadRef.current = null
+
+    const promise = (async () => {
+      try {
+        const companiesRes =
+          await listCompanies(workspaceId)
+
+        const companyList = companiesRes.data || []
+
+        setCompanies(companyList)
+
+        const primary = companyList[0] || null
+
+        if (!primary) {
+          setActiveCompany(null)
+          loadedWorkspaceIdRef.current = workspaceId
+          return false
+        }
+
+        const result =
+          await loadDataForCompany(primary)
+
+        loadedWorkspaceIdRef.current = workspaceId
+
+        return result
+      } catch (error) {
+        console.error(
+          `Failed to open workspace ${workspaceId}:`,
+          error
+        )
+
+        setCompanies([])
+        setActiveCompany(null)
+        setActiveDocument(null)
+        setExtractionDataState(null)
+        setRedFlagData(null)
+
+        return false
+      } finally {
+        if (
+          workspaceLoadRef.current?.workspaceId ===
+          workspaceId
+        ) {
+          workspaceLoadRef.current = null
+        }
+      }
+    })()
+
+    workspaceLoadRef.current = {
+      workspaceId,
+      promise,
     }
 
-    const companiesRes = await listCompanies(workspace.id)
-    const companyList = companiesRes.data
-    setCompanies(companyList)
-
-    const primary = companyList[0] || null
-    if (!primary) {
-      setActiveCompany(null)
-      return false
-    }
-
-    return loadDataForCompany(primary)
+    return promise
   }
 
-  // Called by DocumentUpload after a successful upload + extraction +
-  // red-flag run, so the dashboard has fresh data without a refetch.
-  function setPipelineResults({ document, extraction, redFlags }) {
+  // ---------------------------------------------------------
+  // PIPELINE RESULTS
+  // ---------------------------------------------------------
+
+  function setPipelineResults({
+    document,
+    extraction,
+    redFlags,
+  }) {
     setActiveDocument(document)
     setExtractionDataState(extraction)
     setRedFlagData(redFlags)
+
+    if (activeCompany?.id) {
+      loadedCompanyIdRef.current =
+        String(activeCompany.id)
+    }
   }
+
+  // ---------------------------------------------------------
+  // CONTEXT
+  // ---------------------------------------------------------
 
   return (
     <WorkspaceContext.Provider
       value={{
         sessions,
         sessionsLoading,
+
         refreshSessions,
         createSession,
         deleteSession,
+
         activeWorkspace,
         setActiveWorkspace,
+
         companies,
         refreshCompanies,
-        activeCompany,
         addCompany,
+
+        activeCompany,
         selectCompany,
+
         activeDocument,
         extractionData,
         redFlagData,
+
         setPipelineResults,
       }}
     >
@@ -215,8 +533,12 @@ export function WorkspaceProvider({ children }) {
 
 export function useWorkspace() {
   const context = useContext(WorkspaceContext)
+
   if (!context) {
-    throw new Error('useWorkspace must be used within a WorkspaceProvider')
+    throw new Error(
+      'useWorkspace must be used within a WorkspaceProvider'
+    )
   }
+
   return context
 }

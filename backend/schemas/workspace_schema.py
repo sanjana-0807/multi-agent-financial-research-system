@@ -18,5 +18,9 @@ class WorkspaceResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Number of documents uploaded to companies
+    # belonging to this workspace.
+    document_count: int = 0
+
     class Config:
         from_attributes = True

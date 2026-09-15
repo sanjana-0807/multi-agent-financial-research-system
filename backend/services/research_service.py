@@ -875,9 +875,15 @@ def _percentage_statement_windows(document_id: str) -> list[dict]:
         return []
 
     windows = []
+    # Annual reports use different names for the primary income statement:
+    # Statements of Income, Statements of Operations, Statements of
+    # Earnings, Profit and Loss, etc.  Match the statement concept rather
+    # than one company-specific heading.
     marker_re = re.compile(
-        r"consolidated\s+(?:statements?|income\s+statements?)\s+of\s+income|"
-        r"consolidated\s+income\s+statement",
+        r"consolidated\s+(?:statements?|income\s+statements?|"
+        r"statements?\s+of\s+(?:income|operations?|earnings?|profit\s+and\s+loss)|"
+        r"income\s+statements?|operations?\s+statements?|"
+        r"earnings?\s+statements?|profit\s+and\s+loss\s+statements?)",
         re.IGNORECASE,
     )
 
@@ -908,9 +914,17 @@ def _percentage_statement_windows(document_id: str) -> list[dict]:
         for center, item in enumerate(chunks):
             text = item.get("text", "")
             lower = text.lower()
-            if "year ended" in lower and re.search(r"\brevenue\b", lower):
-                start = max(0, center - 2)
-                end = min(len(chunks), center + 3)
+            has_revenue = re.search(
+                r"\b(?:total\s+revenues?|revenue|revenues|net\s+sales)\b",
+                lower,
+            )
+            has_financial_header = (
+                "year ended" in lower
+                or re.search(r"\b20\d{2}\b.*\b20\d{2}\b", lower)
+            )
+            if has_financial_header and has_revenue:
+                start = max(0, center - 3)
+                end = min(len(chunks), center + 4)
                 selected = chunks[start:end]
                 windows.append({
                     "text": "\n".join(x.get("text", "") for x in selected),
@@ -987,6 +1001,19 @@ def _extract_table_years(text: str) -> list[int]:
 
     if candidates:
         return max(candidates, key=len)
+
+    # Fallback for PDFs whose table header is flattened or uses wording such
+    # as "Years 2025 2024 2023" instead of the literal "Year Ended".
+    # Keep only a small set of distinct years and prefer years close to the
+    # beginning of the financial-statement text.
+    all_years = []
+    for y in re.findall(r"\b20\d{2}\b", text[:2200]):
+        y = int(y)
+        if y not in all_years:
+            all_years.append(y)
+
+    if len(all_years) >= 2:
+        return all_years[:5]
 
     return []
 
@@ -1082,8 +1109,13 @@ def _find_best_revenue_table(
                 score += 50
 
             source = dict(window["source"])
-            source["page"] = min(window["pages"]) if window["pages"] else source.get("page")
-            source["chunk_index"] = min(window["chunk_indices"]) if window["chunk_indices"] else source.get("chunk_index")
+            all_chunks = _get_all_document_chunks(document_id)
+            by_index = {item.get("chunk_index"): item for item in all_chunks}
+            for chunk_index in window.get("chunk_indices", []):
+                chunk = by_index.get(chunk_index)
+                if chunk and re.search(r"(?i)\b(?:total\s+revenues?|revenue|net\s+sales)\b", chunk.get("text", "")):
+                    source = dict(chunk)
+                    break
 
             candidates.append({
                 "score": score,
@@ -1154,6 +1186,82 @@ def _calculate_percentage(
         "old_source": table["source"],
         "new_source": table["source"],
     }
+
+
+def _find_best_single_revenue_table(document_id: str, year: int) -> dict | None:
+    """Find one year's consolidated total-revenue row."""
+    windows = _percentage_statement_windows(document_id)
+    print("Single-year statement windows:", len(windows))
+    candidates = []
+
+    for window in windows:
+        text = window.get("text", "")
+        years = _extract_table_years(text)
+        if year not in years:
+            continue
+
+        year_index = years.index(year)
+        lower = text.lower()
+        all_chunks = _get_all_document_chunks(document_id)
+        by_index = {item.get("chunk_index"): item for item in all_chunks}
+
+        for row in _extract_revenue_rows(text):
+            values = row.get("values", [])
+            if year_index >= len(values):
+                continue
+
+            label = row.get("label", "").lower().strip()
+            score = 0
+            if "consolidated statements of income" in lower:
+                score += 500
+            if "consolidated statement of income" in lower:
+                score += 500
+            if "consolidated income statements" in lower:
+                score += 500
+            if "consolidated income statement" in lower:
+                score += 500
+            if label in ("total revenue", "total revenues"):
+                score += 300
+            elif label == "revenue":
+                score += 100
+            elif label == "revenues":
+                score += 75
+            if "year ended" in lower:
+                score += 100
+            if len(values) == len(years):
+                score += 100
+            if "cost of sales" in lower or "cost of revenue" in lower:
+                score += 50
+            if "gross profit" in lower:
+                score += 50
+
+            source = dict(window.get("source") or {})
+            for chunk_index in window.get("chunk_indices", []):
+                chunk = by_index.get(chunk_index)
+                if chunk and re.search(r"(?i)\b(?:total\s+revenues?|revenue|net\s+sales)\b", chunk.get("text", "")):
+                    source = dict(chunk)
+                    break
+
+            candidates.append({
+                "score": score,
+                "value": values[year_index],
+                "year": year,
+                "source": source,
+                "years": years,
+                "values": values,
+                "label": row.get("label", ""),
+            })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    best = candidates[0]
+    print("Selected single-year revenue row:", best["label"])
+    print("Selected year:", best["year"])
+    print("Selected value:", best["value"])
+    print("Selected page:", best["source"].get("page"))
+    return best
 
 
 # ============================================================
@@ -1315,7 +1423,6 @@ async def _save_chat_message(
     document_id: str,
     role: str,
     content: str,
-    sources: list[dict] | None = None,
 ):
 
     await ChatMessage(
@@ -1323,7 +1430,6 @@ async def _save_chat_message(
         document_id=document_id,
         role=role,
         content=content,
-        sources=sources or [],
     ).insert()
 
 
@@ -1434,12 +1540,19 @@ class ResearchService:
         # 5. RESOLVE FOLLOW-UP
         # ====================================================
 
-        resolved_question = (
-            _resolve_follow_up_question(
-                question,
-                history,
-            )
+        has_explicit_year = bool(
+            re.search(r"\b20\d{2}\b", question)
         )
+
+        if has_explicit_year:
+            resolved_question = question
+        else:
+            resolved_question = (
+                _resolve_follow_up_question(
+                    question,
+                    history,
+                )
+            )
 
         print()
         print("=" * 70)
@@ -1599,12 +1712,6 @@ class ResearchService:
                     document_id,
                     "assistant",
                     answer,
-                    sources=_document_sources(
-                        [
-                            old_source,
-                            new_source,
-                        ]
-                    ),
                 )
 
                 return {
@@ -1775,15 +1882,44 @@ class ResearchService:
 
             if financial_question:
 
-                (
-                    direct_value,
-                    direct_source,
-                    direct_year,
-                    direct_metric,
-                ) = _extract_financial_value(
-                    resolved_question,
-                    raw_evidence,
-                )
+                direct_value = None
+                direct_source = None
+                direct_year = None
+                direct_metric = _get_metric(resolved_question)
+                requested_years = _extract_years(resolved_question)
+
+                # For revenue questions, inspect the exact document's
+                # consolidated income statement before trusting semantic top-k.
+                if direct_metric == "Total revenues" and requested_years:
+                    direct_year = requested_years[-1]
+                    table = _find_best_single_revenue_table(
+                        document_id=document_id,
+                        year=direct_year,
+                    )
+                    if table:
+                        direct_value = table["value"]
+                        direct_source = table["source"]
+
+                # Existing deterministic extractor remains the fallback for
+                # other financial metrics.
+                if direct_value is None or direct_source is None:
+                    (
+                        fallback_value,
+                        fallback_source,
+                        fallback_year,
+                        fallback_metric,
+                    ) = _extract_financial_value(
+                        resolved_question,
+                        raw_evidence,
+                    )
+                    if direct_value is None:
+                        direct_value = fallback_value
+                    if direct_source is None:
+                        direct_source = fallback_source
+                    if direct_year is None:
+                        direct_year = fallback_year
+                    if direct_metric is None:
+                        direct_metric = fallback_metric
 
                 if (
                     direct_value is not None
@@ -1830,9 +1966,6 @@ class ResearchService:
                         document_id,
                         "assistant",
                         answer,
-                        sources=_document_sources(
-                            [direct_source]
-                        ),
                     )
 
                     return {
@@ -2215,25 +2348,7 @@ IMPORTANT RULES:
             )
 
         # ====================================================
-        # 19. SOURCES
-        # ====================================================
-
-        sources = []
-
-        sources.extend(
-            _document_sources(
-                answer_evidence
-            )
-        )
-
-        sources.extend(
-            _web_sources(
-                web_evidence
-            )
-        )
-
-        # ====================================================
-        # 20. SAVE CHAT
+        # 19. SAVE CHAT
         # ====================================================
 
         await _save_chat_message(
@@ -2248,7 +2363,24 @@ IMPORTANT RULES:
             document_id,
             "assistant",
             answer,
-            sources=sources,
+        )
+
+        # ====================================================
+        # 20. SOURCES
+        # ====================================================
+
+        sources = []
+
+        sources.extend(
+            _document_sources(
+                answer_evidence
+            )
+        )
+
+        sources.extend(
+            _web_sources(
+                web_evidence
+            )
         )
 
         # ====================================================
@@ -2279,7 +2411,6 @@ IMPORTANT RULES:
                 detail="Document ID is required.",
             )
 
-        # Get all messages for this document.
         messages = await ChatMessage.find(
             ChatMessage.document_id == document_id
         ).sort(
@@ -2289,7 +2420,6 @@ IMPORTANT RULES:
         conversations = {}
 
         for message in messages:
-
             conversation_id = message.conversation_id
 
             if conversation_id not in conversations:
@@ -2306,49 +2436,32 @@ IMPORTANT RULES:
             conversation["messages"].append({
                 "role": message.role,
                 "content": message.content,
-                "sources": getattr(
-                    message,
-                    "sources",
-                    [],
-                ) or [],
+                "sources": getattr(message, "sources", []) or [],
                 "created_at": message.created_at,
             })
 
             conversation["updated_at"] = message.created_at
 
-        # Create a useful title from the first user question.
         result = []
 
         for conversation in conversations.values():
-
             title = "New Chat"
 
             for message in conversation["messages"]:
                 if message["role"] == "user":
                     title = message["content"].strip()
-
                     if len(title) > 60:
                         title = title[:60].rstrip() + "..."
-
                     break
 
             result.append({
-                "conversation_id": conversation[
-                    "conversation_id"
-                ],
-                "document_id": conversation[
-                    "document_id"
-                ],
+                "conversation_id": conversation["conversation_id"],
+                "document_id": conversation["document_id"],
                 "title": title,
-                "created_at": conversation[
-                    "created_at"
-                ],
-                "updated_at": conversation[
-                    "updated_at"
-                ],
+                "created_at": conversation["created_at"],
+                "updated_at": conversation["updated_at"],
             })
 
-        # Newest conversation first.
         result.sort(
             key=lambda item: item["updated_at"],
             reverse=True,
@@ -2359,19 +2472,13 @@ IMPORTANT RULES:
             "conversations": result,
         }
 
-
     @staticmethod
     async def get_conversation_messages(
         conversation_id: str,
         document_id: str,
     ):
-        conversation_id = _clean(
-            conversation_id
-        )
-
-        document_id = _clean(
-            document_id
-        )
+        conversation_id = _clean(conversation_id)
+        document_id = _clean(document_id)
 
         if not conversation_id:
             raise HTTPException(
@@ -2401,17 +2508,12 @@ IMPORTANT RULES:
                 {
                     "role": message.role,
                     "content": message.content,
-                    "sources": getattr(
-                        message,
-                        "sources",
-                        [],
-                    ) or [],
+                    "sources": getattr(message, "sources", []) or [],
                     "created_at": message.created_at,
                 }
                 for message in messages
             ],
         }
-
 
     # ========================================================
     # LEGACY ENDPOINTS
