@@ -90,6 +90,21 @@ async def update_company(company_id: str, payload: CompanyUpdate, current_user: 
     company = await _get_owned_company(company_id, current_user)
 
     update_data = payload.model_dump(exclude_unset=True)
+
+    if "ticker" in update_data:
+        new_ticker = update_data["ticker"].upper()
+        if new_ticker != company.ticker:
+            existing = await Company.find_one(
+                Company.ticker == new_ticker,
+                Company.workspace_id == company.workspace_id,
+            )
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Company with ticker '{new_ticker}' already exists in this workspace",
+                )
+        update_data["ticker"] = new_ticker
+
     for field, value in update_data.items():
         setattr(company, field, value)
 

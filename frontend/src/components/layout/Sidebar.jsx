@@ -68,9 +68,7 @@ function Sidebar() {
                     <span className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-blue-600 animate-pulse' : 'bg-slate-300'}`} />
                     <span className="truncate">{s.name}</span>
                   </div>
-                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-white text-slate-500 border border-slate-200">
-                    {s.document_count || (s.documents?.length || 0)}
-                  </span>
+                  
                 </button>
               )
             })

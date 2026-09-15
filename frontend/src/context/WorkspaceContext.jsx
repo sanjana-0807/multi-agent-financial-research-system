@@ -3,8 +3,11 @@ import { AuthContext } from '../features/auth/AuthContext.jsx'
 import {
   listWorkspaces,
   createWorkspace as apiCreateWorkspace,
+  updateWorkspace as apiUpdateWorkspace,
   deleteWorkspace as apiDeleteWorkspace,
+  getWorkspaceDocuments,
 } from '../api/workspaceApi.js'
+import { deleteDocument as apiDeleteDocument } from '../api/documentsApi.js'
 import { createCompany, listCompanies } from '../api/companiesApi.js'
 import { getLatestDocumentForCompany } from '../api/documentsApi.js'
 import { getExtraction } from '../api/extractionApi.js'
@@ -107,6 +110,18 @@ export function WorkspaceProvider({ children }) {
     return { workspace }
   }
 
+  async function updateSession(workspaceId, updates) {
+    const res = await apiUpdateWorkspace(workspaceId, updates)
+
+    await refreshSessions()
+
+    if (String(activeWorkspace?.id) === String(workspaceId)) {
+      setActiveWorkspaceState(res.data)
+    }
+
+    return res.data
+  }
+
   async function deleteSession(workspaceId) {
     await apiDeleteWorkspace(workspaceId)
 
@@ -125,6 +140,16 @@ export function WorkspaceProvider({ children }) {
       companyLoadRef.current = null
       loadedCompanyIdRef.current = null
     }
+  }
+
+  async function getSessionDocuments(workspaceId) {
+    const res = await getWorkspaceDocuments(workspaceId)
+    return res.data
+  }
+
+  async function deleteSessionDocument(workspaceId, documentId) {
+    await apiDeleteDocument(documentId)
+    await refreshSessions()
   }
 
   // ---------------------------------------------------------
@@ -169,9 +194,9 @@ export function WorkspaceProvider({ children }) {
       return [...prev, company]
     })
 
-    if (!activeCompany) {
-      setActiveCompany(company)
-    }
+    // Do not automatically select the newly added company.
+    // The user should explicitly choose a company before its
+    // document/extraction/red-flag data is loaded.
 
     return company
   }
@@ -368,9 +393,29 @@ export function WorkspaceProvider({ children }) {
     )
 
     /*
-     * IMPORTANT:
-     * If this workspace is already active and completely loaded,
-     * do not run listCompanies() again.
+     * IMPORTANT USER FLOW:
+     *
+     * Selecting a session must NOT automatically select its first
+     * company or load that company's document/extraction/red flags.
+     *
+     * The flow is:
+     *
+     *   Session
+     *      ↓
+     *   Companies in that session
+     *      ↓
+     *   User selects a company
+     *      ↓
+     *   loadDataForCompany(company)
+     *      ↓
+     *   Result / Overview
+     */
+
+    /*
+     * If this workspace is already active and its companies have
+     * already been loaded, do not fetch them again.
+     *
+     * Most importantly, do not automatically select a company.
      */
     if (
       loadedWorkspaceIdRef.current === workspaceId &&
@@ -378,30 +423,11 @@ export function WorkspaceProvider({ children }) {
     ) {
       setActiveWorkspaceState(workspace)
 
-      if (companies.length > 0) {
-        const currentCompany =
-          companies.find(
-            (company) =>
-              String(company.id) ===
-              String(activeCompany?.id)
-          ) || companies[0]
-
-        if (
-          currentCompany &&
-          loadedCompanyIdRef.current !==
-            String(currentCompany.id)
-        ) {
-          return loadDataForCompany(currentCompany)
-        }
-
-        return Boolean(activeDocument)
-      }
-
       return false
     }
 
     /*
-     * If the workspace is already being loaded, reuse that
+     * If the workspace is already being loaded, reuse the existing
      * request instead of starting another one.
      */
     if (
@@ -412,6 +438,7 @@ export function WorkspaceProvider({ children }) {
 
     setActiveWorkspaceState(workspace)
 
+    // A newly selected session starts with no selected company.
     setCompanies([])
     setActiveCompany(null)
     setActiveDocument(null)
@@ -427,24 +454,29 @@ export function WorkspaceProvider({ children }) {
         const companiesRes =
           await listCompanies(workspaceId)
 
-        const companyList = companiesRes.data || []
+        const companyList = Array.isArray(companiesRes.data)
+          ? companiesRes.data
+          : []
 
         setCompanies(companyList)
 
-        const primary = companyList[0] || null
-
-        if (!primary) {
-          setActiveCompany(null)
-          loadedWorkspaceIdRef.current = workspaceId
-          return false
-        }
-
-        const result =
-          await loadDataForCompany(primary)
+        /*
+         * DO NOT select companyList[0].
+         *
+         * The user must explicitly click a company.
+         *
+         * Returning false keeps the existing Sessions-page flow
+         * on the company/upload screen rather than opening a
+         * company result automatically.
+         */
+        setActiveCompany(null)
+        setActiveDocument(null)
+        setExtractionDataState(null)
+        setRedFlagData(null)
 
         loadedWorkspaceIdRef.current = workspaceId
 
-        return result
+        return false
       } catch (error) {
         console.error(
           `Failed to open workspace ${workspaceId}:`,
@@ -507,7 +539,10 @@ export function WorkspaceProvider({ children }) {
 
         refreshSessions,
         createSession,
+        updateSession,
         deleteSession,
+        getSessionDocuments,
+        deleteSessionDocument,
 
         activeWorkspace,
         setActiveWorkspace,

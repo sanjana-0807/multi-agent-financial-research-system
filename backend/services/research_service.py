@@ -971,62 +971,128 @@ def _number_matches(text: str) -> list[tuple[int, int, float]]:
 
 
 def _extract_table_years(text: str) -> list[int]:
-    """Extract annual columns from the nearest Year Ended header."""
-    lower = text.lower()
-    positions = [m.start() for m in re.finditer(r"\byear\s+ended\b", lower)]
-    candidates = []
+    """Extract annual column years from financial-statement text.
 
-    for pos in positions:
-        header = text[pos:pos + 1500]
+    Prefer clean consecutive fiscal-year sequences. PDF extraction can place
+    unrelated "year ended" phrases in the same window, so this helper avoids
+    blindly taking the first matching occurrence.
+    """
+    if not text:
+        return []
+
+    candidates: list[tuple[int, list[int]]] = []
+
+    # Explicit statement headers are preferred.
+    for match in re.finditer(
+        r"(?i)\b(?:for\s+the\s+)?years?\s+ended\b|\byears?\b",
+        text,
+    ):
+        header = text[match.start():min(len(text), match.start() + 500)]
         date_years = re.findall(
-            r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-            r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
-            r"Dec(?:ember)?)\s+\d{1,2}(?:,\s*|\s+)(20\d{2})",
+            r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+            r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
+            r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
+            r"\d{1,2}(?:,\s*|\s+)(20\d{2})",
             header,
             re.IGNORECASE,
         )
-        years = []
-        for y in date_years:
-            y = int(y)
-            if y not in years:
-                years.append(y)
+        years = list(dict.fromkeys(int(y) for y in date_years))
         if len(years) >= 2:
-            candidates.append(years[:5])
+            candidates.append((len(years), years[:5]))
             continue
 
-        plain_years = [int(y) for y in re.findall(r"\b20\d{2}\b", header)]
-        plain_years = list(dict.fromkeys(plain_years))
+        plain_years = list(dict.fromkeys(
+            int(y) for y in re.findall(r"\b20\d{2}\b", header)
+        ))
         if len(plain_years) >= 2:
-            candidates.append(plain_years[:5])
+            candidates.append((len(plain_years), plain_years[:5]))
+
+    all_years = [int(y) for y in re.findall(r"\b20\d{2}\b", text)]
+    for i in range(len(all_years) - 2):
+        seq = all_years[i:i + 3]
+        if len(set(seq)) != 3:
+            continue
+        if (
+            seq[1] == seq[0] + 1 and seq[2] == seq[1] + 1
+        ) or (
+            seq[1] == seq[0] - 1 and seq[2] == seq[1] - 1
+        ):
+            candidates.append((3, seq))
 
     if candidates:
-        return max(candidates, key=len)
+        candidates.sort(
+            key=lambda item: (item[0], max(item[1]) if item[1] else 0),
+            reverse=True,
+        )
+        return candidates[0][1]
 
-    # Fallback for PDFs whose table header is flattened or uses wording such
-    # as "Years 2025 2024 2023" instead of the literal "Year Ended".
-    # Keep only a small set of distinct years and prefer years close to the
-    # beginning of the financial-statement text.
-    all_years = []
-    for y in re.findall(r"\b20\d{2}\b", text[:2200]):
-        y = int(y)
-        if y not in all_years:
-            all_years.append(y)
+    unique_years = list(dict.fromkeys(all_years[:5]))
+    return unique_years if len(unique_years) >= 2 else []
 
-    if len(all_years) >= 2:
-        return all_years[:5]
+
+def _extract_row_years(text: str, row_position: int) -> list[int]:
+    """Extract the fiscal-year column order nearest to a financial row.
+
+    This row-local lookup is important for flattened PDFs: a narrative phrase
+    such as "recognized as revenue during the year ended 2025" must not be
+    mistaken for the column header of the consolidated revenue table.
+    """
+    if not text:
+        return []
+
+    start = max(0, row_position - 1600)
+    context = text[start:row_position]
+
+    header_matches = list(re.finditer(
+        r"(?i)\b(?:for\s+the\s+)?years?\s+ended\b|\byears?\b",
+        context,
+    ))
+
+    regions = []
+    if header_matches:
+        # Try the closest header first.
+        regions.append(context[header_matches[-1].start():])
+    regions.append(context[-800:])
+    regions.append(context)
+
+    candidates: list[tuple[int, list[int]]] = []
+
+    for region in regions:
+        year_matches = list(re.finditer(r"\b20\d{2}\b", region))
+        years = [int(m.group(0)) for m in year_matches]
+
+        for i in range(len(years) - 2):
+            seq = years[i:i + 3]
+            if len(set(seq)) != 3:
+                continue
+            if (
+                seq[1] == seq[0] + 1 and seq[2] == seq[1] + 1
+            ) or (
+                seq[1] == seq[0] - 1 and seq[2] == seq[1] - 1
+            ):
+                candidates.append((3, seq))
+
+        unique = list(dict.fromkeys(years))
+        if len(unique) >= 2:
+            candidates.append((len(unique), unique[:5]))
+
+    if candidates:
+        candidates.sort(
+            key=lambda item: (item[0], max(item[1]) if item[1] else 0),
+            reverse=True,
+        )
+        return candidates[0][1]
 
     return []
 
 
 def _extract_revenue_rows(text: str) -> list[dict]:
-    """Find revenue rows and the numeric values immediately belonging to them."""
+    """Find revenue/net-sales rows and the numbers immediately following them."""
     if not text:
         return []
 
-    # Exact row labels only. This prevents phrases such as revenue recognition,
-    # revenue growth, segment revenue, etc. from becoming financial rows.
     label_re = re.compile(
-        r"(?im)(?<![\w])(?:total\s+revenues?|revenue|net\s+sales)(?![\w])"
+        r"(?im)(?<![\w])(?:total\s+net\s+sales|total\s+revenues?|net\s+sales|revenue)(?![\w])"
     )
     stop_re = re.compile(
         r"(?im)\b(?:cost\s+of\s+revenue|gross\s+profit|operating\s+expenses|"
@@ -1047,13 +1113,12 @@ def _extract_revenue_rows(text: str) -> list[dict]:
         if len(nums) < 2:
             continue
 
-        # Require the first values to occur close to the row label. A financial
-        # row should not pull numbers from a paragraph far below it.
         values = [value for _, _, value in nums[:5]]
         rows.append({
             "label": match.group(0).strip(),
             "position": match.start(),
             "values": values,
+            "years": _extract_row_years(text, match.start()),
         })
 
     return rows
@@ -1064,69 +1129,102 @@ def _find_best_revenue_table(
     old_year: int,
     new_year: int,
 ) -> dict | None:
-    """Find one annual consolidated income-statement revenue row containing both years."""
+    """Find one consolidated revenue row containing both requested years."""
     windows = _percentage_statement_windows(document_id)
     print("Statement windows:", len(windows))
 
     candidates = []
+    all_chunks = _get_all_document_chunks(document_id)
+    by_index = {item.get("chunk_index"): item for item in all_chunks}
 
     for window in windows:
-        text = window["text"]
-        years = _extract_table_years(text)
-        if old_year not in years or new_year not in years:
+        text = window.get("text", "")
+        if not text:
             continue
 
-        rows = _extract_revenue_rows(text)
-        for row in rows:
-            values = row["values"]
-            if len(values) < len(years):
+        lower = text.lower()
+        is_income_statement = any(
+            phrase in lower
+            for phrase in (
+                "consolidated statements of income",
+                "consolidated statement of income",
+                "consolidated income statements",
+                "consolidated income statement",
+                "consolidated statements of operations",
+                "consolidated statement of operations",
+            )
+        )
+        if not is_income_statement:
+            continue
+
+        fallback_years = _extract_table_years(text)
+
+        for row in _extract_revenue_rows(text):
+            values = row.get("values", [])
+            row_years = row.get("years") or fallback_years
+
+            if old_year not in row_years or new_year not in row_years:
                 continue
 
-            old_index = years.index(old_year)
-            new_index = years.index(new_year)
+            old_index = row_years.index(old_year)
+            new_index = row_years.index(new_year)
             if old_index >= len(values) or new_index >= len(values):
                 continue
 
-            old_value = values[old_index]
-            new_value = values[new_index]
-
-            # Strongly prefer the exact consolidated-statement context.
-            lower = text.lower()
+            label = row.get("label", "").lower().strip()
             score = 0
+            if label == "total net sales":
+                score += 1200
+            elif label in ("total revenue", "total revenues"):
+                score += 1100
+            elif label == "net sales":
+                score += 900
+            elif label == "revenue":
+                score += 200
+
+            if "consolidated statements of operations" in lower:
+                score += 600
+            if "consolidated statement of operations" in lower:
+                score += 600
             if "consolidated statements of income" in lower:
-                score += 300
+                score += 600
             if "consolidated statement of income" in lower:
-                score += 300
+                score += 600
             if "year ended" in lower:
                 score += 100
-            if row["label"].lower().strip() in ("revenue", "total revenue", "total revenues"):
+            if len(values) >= 3:
+                score += 100
+            if len(values) == len(row_years):
                 score += 150
-            if "cost of revenue" in lower:
-                score += 75
+            if "cost of sales" in lower or "cost of revenue" in lower:
+                score += 50
             if "gross profit" in lower:
                 score += 50
-            if len(values) >= 3:
-                score += 50
 
-            source = dict(window["source"])
-            all_chunks = _get_all_document_chunks(document_id)
-            by_index = {item.get("chunk_index"): item for item in all_chunks}
+            source = dict(window.get("source") or {})
+            row_label = row.get("label", "").strip()
             for chunk_index in window.get("chunk_indices", []):
                 chunk = by_index.get(chunk_index)
-                if chunk and re.search(r"(?i)\b(?:total\s+revenues?|revenue|net\s+sales)\b", chunk.get("text", "")):
+                if not chunk:
+                    continue
+                chunk_text = chunk.get("text", "")
+                if re.search(
+                    rf"(?i)(?<![\w]){re.escape(row_label)}(?![\w])",
+                    chunk_text,
+                ):
                     source = dict(chunk)
                     break
 
             candidates.append({
                 "score": score,
-                "old_value": old_value,
-                "new_value": new_value,
+                "old_value": values[old_index],
+                "new_value": values[new_index],
                 "old_year": old_year,
                 "new_year": new_year,
                 "source": source,
-                "years": years,
+                "years": row_years,
                 "values": values,
-                "label": row["label"],
+                "label": row.get("label", ""),
             })
 
     if not candidates:
@@ -1188,66 +1286,114 @@ def _calculate_percentage(
     }
 
 
-def _find_best_single_revenue_table(document_id: str, year: int) -> dict | None:
-    """Find one year's consolidated total-revenue row."""
+def _find_best_single_revenue_table(
+    document_id: str,
+    year: int,
+) -> dict | None:
+    """Find the consolidated total-revenue value for one fiscal year."""
     windows = _percentage_statement_windows(document_id)
     print("Single-year statement windows:", len(windows))
+
     candidates = []
+    all_chunks = _get_all_document_chunks(document_id)
+    by_index = {item.get("chunk_index"): item for item in all_chunks}
 
     for window in windows:
         text = window.get("text", "")
-        years = _extract_table_years(text)
-        if year not in years:
+        if not text:
             continue
 
-        year_index = years.index(year)
         lower = text.lower()
-        all_chunks = _get_all_document_chunks(document_id)
-        by_index = {item.get("chunk_index"): item for item in all_chunks}
+        is_income_statement = any(
+            phrase in lower
+            for phrase in (
+                "consolidated statements of income",
+                "consolidated statement of income",
+                "consolidated income statements",
+                "consolidated income statement",
+                "consolidated statements of operations",
+                "consolidated statement of operations",
+            )
+        )
+        if not is_income_statement:
+            continue
+
+        fallback_years = _extract_table_years(text)
 
         for row in _extract_revenue_rows(text):
             values = row.get("values", [])
+            row_years = row.get("years") or fallback_years
+
+            if year not in row_years:
+                continue
+
+            year_index = row_years.index(year)
             if year_index >= len(values):
                 continue
 
             label = row.get("label", "").lower().strip()
             score = 0
-            if "consolidated statements of income" in lower:
-                score += 500
-            if "consolidated statement of income" in lower:
-                score += 500
-            if "consolidated income statements" in lower:
-                score += 500
-            if "consolidated income statement" in lower:
-                score += 500
-            if label in ("total revenue", "total revenues"):
-                score += 300
+            if label == "total net sales":
+                score += 1500
+            elif label in ("total revenue", "total revenues"):
+                score += 1400
+            elif label == "net sales":
+                score += 1100
             elif label == "revenue":
-                score += 100
-            elif label == "revenues":
-                score += 75
+                score += 200
+
+            if "consolidated statements of operations" in lower:
+                score += 700
+            if "consolidated statement of operations" in lower:
+                score += 700
+            if "consolidated statements of income" in lower:
+                score += 700
+            if "consolidated statement of income" in lower:
+                score += 700
             if "year ended" in lower:
                 score += 100
-            if len(values) == len(years):
+            if len(values) >= 3:
                 score += 100
+            if len(values) == len(row_years):
+                score += 200
             if "cost of sales" in lower or "cost of revenue" in lower:
                 score += 50
             if "gross profit" in lower:
                 score += 50
 
             source = dict(window.get("source") or {})
+            row_label = row.get("label", "").strip()
+            row_values = row.get("values", [])[:3]
+
             for chunk_index in window.get("chunk_indices", []):
                 chunk = by_index.get(chunk_index)
-                if chunk and re.search(r"(?i)\b(?:total\s+revenues?|revenue|net\s+sales)\b", chunk.get("text", "")):
+                if not chunk:
+                    continue
+
+                chunk_text = chunk.get("text", "")
+                if not re.search(
+                    rf"(?i)(?<![\w]){re.escape(row_label)}(?![\w])",
+                    chunk_text,
+                ):
+                    continue
+
+                if any(
+                    f"{value:,.0f}" in chunk_text
+                    or str(int(value)) in chunk_text
+                    for value in row_values
+                    if isinstance(value, (int, float))
+                ):
                     source = dict(chunk)
                     break
+
+                source = dict(chunk)
 
             candidates.append({
                 "score": score,
                 "value": values[year_index],
                 "year": year,
                 "source": source,
-                "years": years,
+                "years": row_years,
                 "values": values,
                 "label": row.get("label", ""),
             })
@@ -1257,10 +1403,12 @@ def _find_best_single_revenue_table(document_id: str, year: int) -> dict | None:
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
     best = candidates[0]
+
     print("Selected single-year revenue row:", best["label"])
     print("Selected year:", best["year"])
     print("Selected value:", best["value"])
     print("Selected page:", best["source"].get("page"))
+
     return best
 
 

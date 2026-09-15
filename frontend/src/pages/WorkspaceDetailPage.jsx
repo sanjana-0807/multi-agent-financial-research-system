@@ -9,6 +9,7 @@ import Button from '../components/Button.jsx'
 import Badge from '../components/Badge.jsx'
 import { useWorkspace } from '../context/WorkspaceContext.jsx'
 import { formatCurrency } from '../utils/formatCurrency.js'
+import useCompanyDocumentStatuses from '../features/documents/useCompanyDocumentStatuses.js'
 import { runComparison, getComparison, listComparisons } from '../api/comparisonApi.js'
 import {
   generateReport,
@@ -37,6 +38,10 @@ function WorkspaceDetailPage() {
     selectedComparisonIds: [],
   })
   const navigate = useNavigate()
+
+  // Keep document statuses at the page level so the cache survives tab
+  // unmounts and company switching. Both Overview and Document tabs share it.
+  const { statusByCompany } = useCompanyDocumentStatuses(companies)
 
   const hasData = Boolean(extractionData && extractionData.revenue)
   const currentDoc = activeDocument?.filename || 'No document uploaded yet'
@@ -139,6 +144,7 @@ const FLAG_CATEGORY_GROUPS = {
       companies={companies}
       activeCompany={activeCompany}
       activeDocument={activeDocument}
+      statusByCompany={statusByCompany}
       onSelectCompany={(c) => selectCompany(c)}
       onGoToFlags={() => setActiveTab('flags')}
       onGoToDocument={() => setActiveTab('document')}
@@ -151,6 +157,7 @@ const FLAG_CATEGORY_GROUPS = {
       {activeTab === 'document' && (
         <DocumentTab
           companies={companies}
+          statusByCompany={statusByCompany}
           activeCompany={activeCompany}
           activeDocument={activeDocument}
           onSelectCompany={(c) => { selectCompany(c); setActiveTab('overview') }}
@@ -348,22 +355,7 @@ function EmptyTabState({ title, desc, onUpload }) {
 // Document Agent tab — lists every company in the workspace with its
 // document status, lets the user click into any of them to view its
 // overview, and offers a button to add a new document/company.
-function DocumentTab({ companies, activeCompany, activeDocument, onSelectCompany, onAddDocument }) {
-  const [statusByCompany, setStatusByCompany] = useState({})
-
-  // Reuse the document loaded by WorkspaceContext. This avoids
-  // duplicate requests for every company and prevents request loops.
-  useEffect(() => {
-    if (!activeCompany) {
-      setStatusByCompany({})
-      return
-    }
-
-    setStatusByCompany((prev) => ({
-      ...prev,
-      [activeCompany.id]: activeDocument || null,
-    }))
-  }, [activeCompany, activeDocument])
+function DocumentTab({ companies, statusByCompany, activeCompany, activeDocument, onSelectCompany, onAddDocument }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-3d-subtle space-y-5">
@@ -427,23 +419,8 @@ function DocumentTab({ companies, activeCompany, activeDocument, onSelectCompany
 function OverviewTab({
   extractionData, overallRisk, flags, currentDoc,
   rev, netInc, totalAssets, totalLiab, cashFlow, epsVal, opMargin, currentRatio, debtEq,
-  companies, activeCompany, activeDocument, onSelectCompany, onGoToFlags, onGoToDocument, onGoToComparison, onUpload
+  companies, activeCompany, activeDocument, statusByCompany, onSelectCompany, onGoToFlags, onGoToDocument, onGoToComparison, onUpload
 }) {
-  const [statusByCompany, setStatusByCompany] = useState({})
-
-  // Reuse the document loaded by WorkspaceContext. This avoids
-  // duplicate latest-document requests for every company.
-  useEffect(() => {
-    if (!activeCompany) {
-      setStatusByCompany({})
-      return
-    }
-
-    setStatusByCompany((prev) => ({
-      ...prev,
-      [activeCompany.id]: activeDocument || null,
-    }))
-  }, [activeCompany, activeDocument])
 
   // 1. Executive summary — one sentence combining risk + standout ratios.
   const company = extractionData?.company || 'This company'

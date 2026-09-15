@@ -13,6 +13,7 @@ class CompanyCreate(BaseModel):
 
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
+    ticker: Optional[str] = Field(None, min_length=1, max_length=10)
     industry: Optional[str] = None
     sector: Optional[str] = None
 

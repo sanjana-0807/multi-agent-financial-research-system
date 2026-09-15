@@ -734,3 +734,30 @@ class DocumentService:
         await document.save()
 
         return document
+
+    # ============================================================
+    # DELETE DOCUMENT
+    # ============================================================
+
+    @classmethod
+    async def delete_document(cls, document_id: str) -> None:
+
+        document = await cls.get_document(document_id)
+
+        # Remove chunks from ChromaDB (best-effort; don't block
+        # deletion if Chroma is unreachable).
+        try:
+            collection.delete(
+                where={"document_id": document.document_id}
+            )
+        except Exception:
+            pass
+
+        # Remove the file from disk (best-effort).
+        if document.file_path and os.path.exists(document.file_path):
+            try:
+                os.remove(document.file_path)
+            except Exception:
+                pass
+
+        await document.delete()

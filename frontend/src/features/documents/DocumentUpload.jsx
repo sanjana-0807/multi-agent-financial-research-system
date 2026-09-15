@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   UploadCloud, CheckCircle2, AlertCircle, Cpu, Sparkles,
-  Database, ShieldCheck, Loader2, AlertTriangle, Building2, Check
+  Database, ShieldCheck, Loader2, AlertTriangle, Building2, Check,
+  Pencil, Trash2
 } from 'lucide-react'
 import FileDropzone from '../../components/FileDropzone.jsx'
 import Button from '../../components/Button.jsx'
@@ -10,6 +11,7 @@ import { uploadDocument } from '../../api/documentsApi.js'
 import { runExtraction } from '../../api/extractionApi.js'
 import { runRedFlagAnalysis } from '../../api/redFlagsApi.js'
 import { getLatestDocumentForCompany } from '../../api/documentsApi.js'
+import { updateCompany, deleteCompany } from '../../api/companiesApi.js'
 import { useWorkspace } from '../../context/WorkspaceContext.jsx'
 
 const PIPELINE_STEPS = [
@@ -47,27 +49,80 @@ function isFinancialDocument(fileName) {
 
 function DocumentUpload() {
   const navigate = useNavigate()
-  const { activeWorkspace, companies, activeCompany, addCompany, selectCompany, setPipelineResults } = useWorkspace()
+  const {
+    activeWorkspace,
+    companies,
+    activeCompany,
+    addCompany,
+    selectCompany,
+    refreshCompanies,
+    setPipelineResults,
+  } = useWorkspace()
 
-  // Which companies already have a document — checked once per company list change
+  // Keep the upload page in sync with the active workspace.
+  // The workspace can open before its company list has finished loading,
+  // so refresh it here instead of rendering an empty company selector.
+  useEffect(() => {
+    if (!activeWorkspace?.id || companies.length > 0) return
+
+    let cancelled = false
+
+    async function loadCompanies() {
+      try {
+        const loadedCompanies = await refreshCompanies()
+
+        if (cancelled || !Array.isArray(loadedCompanies)) return
+      } catch (error) {
+        if (!cancelled) {
+          console.error(
+            'Failed to load companies for active workspace:',
+            error
+          )
+        }
+      }
+    }
+
+    loadCompanies()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeWorkspace?.id, companies.length])
+
+  // Which companies already have a document.
+  // Requests run in parallel so one slow company does not delay the others.
   const [docStatusByCompany, setDocStatusByCompany] = useState({})
 
   useEffect(() => {
     let cancelled = false
+
     async function checkAll() {
-      const results = {}
-      for (const c of companies) {
-        try {
-          const res = await getLatestDocumentForCompany(c.id)
-          results[c.id] = res.data.status
-        } catch {
-          results[c.id] = null // no document yet
-        }
+      const entries = await Promise.all(
+        companies.map(async (company) => {
+          try {
+            const res = await getLatestDocumentForCompany(company.id)
+
+            return [company.id, res.data?.status || null]
+          } catch {
+            return [company.id, null]
+          }
+        })
+      )
+
+      if (!cancelled) {
+        setDocStatusByCompany(Object.fromEntries(entries))
       }
-      if (!cancelled) setDocStatusByCompany(results)
     }
-    if (companies.length > 0) checkAll()
-    return () => { cancelled = true }
+
+    if (companies.length > 0) {
+      checkAll()
+    } else {
+      setDocStatusByCompany({})
+    }
+
+    return () => {
+      cancelled = true
+    }
   }, [companies])
 
   const [showAddCompanyForm, setShowAddCompanyForm] = useState(false)
@@ -75,6 +130,13 @@ function DocumentUpload() {
   const [ticker, setTicker] = useState('')
   const [addingCompany, setAddingCompany] = useState(false)
   const [companyError, setCompanyError] = useState(null)
+
+  // --- Rename / Delete company state ---
+  const [editingCompanyId, setEditingCompanyId] = useState(null)
+  const [editName, setEditName] = useState('')
+  const [editTicker, setEditTicker] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const [deletingCompanyId, setDeletingCompanyId] = useState(null)
 
   const [file, setFile] = useState(null)
   const [pipelineActive, setPipelineActive] = useState(false)
@@ -86,19 +148,121 @@ function DocumentUpload() {
   async function handleCreateCompany(e) {
     e.preventDefault()
     if (!companyName.trim() || !ticker.trim()) return
+
     setAddingCompany(true)
     setCompanyError(null)
+
     try {
-      const company = await addCompany({ name: companyName.trim(), ticker: ticker.trim().toUpperCase() })
-      selectCompany(company)
+      const company = await addCompany({
+        name: companyName.trim(),
+        ticker: ticker.trim().toUpperCase(),
+      })
+
+      // New companies have no document yet, so keep the user on
+      // the upload page and select the newly created company.
+      await selectCompany(company)
+
       setCompanyName('')
       setTicker('')
       setShowAddCompanyForm(false)
     } catch (err) {
-      setCompanyError(err.response?.data?.detail || 'Failed to create company')
+      setCompanyError(
+        err.response?.data?.detail || 'Failed to create company'
+      )
     } finally {
       setAddingCompany(false)
     }
+  }
+
+  function startRename(company) {
+    setEditingCompanyId(company.id)
+    setEditName(company.name)
+    setEditTicker(company.ticker)
+    setCompanyError(null)
+  }
+
+  function cancelRename() {
+    setEditingCompanyId(null)
+    setEditName('')
+    setEditTicker('')
+  }
+
+  async function handleRenameSubmit(e, companyId) {
+    e.preventDefault()
+    if (!editName.trim() || !editTicker.trim()) return
+
+    setRenaming(true)
+    setCompanyError(null)
+
+    try {
+      await updateCompany(companyId, {
+        name: editName.trim(),
+        ticker: editTicker.trim().toUpperCase(),
+      })
+      await refreshCompanies()
+      cancelRename()
+    } catch (err) {
+      setCompanyError(err.response?.data?.detail || 'Failed to rename company')
+    } finally {
+      setRenaming(false)
+    }
+  }
+
+  async function handleDeleteCompany(company) {
+    const confirmed = window.confirm(
+      `Delete "${company.name}" (${company.ticker})? This cannot be undone.`
+    )
+    if (!confirmed) return
+
+    setDeletingCompanyId(company.id)
+    setCompanyError(null)
+
+    try {
+      await deleteCompany(company.id)
+      await refreshCompanies()
+    } catch (err) {
+      setCompanyError(err.response?.data?.detail || 'Failed to delete company')
+    } finally {
+      setDeletingCompanyId(null)
+    }
+  }
+
+  async function handleCompanySelect(company) {
+    if (!company) return
+
+    setPipelineError(null)
+
+    /*
+     * If a document already exists, open the result dashboard immediately.
+     * selectCompany() continues loading extraction/red-flag data in the
+     * background through WorkspaceContext.
+     *
+     * If there is no document, stay on Upload and simply select the company
+     * so the user can upload its filing.
+     */
+    const existingDocumentStatus = docStatusByCompany[company.id]
+
+    if (existingDocumentStatus) {
+      selectCompany(company).catch((error) => {
+        console.error(
+          `Failed to load company ${company.id}:`,
+          error
+        )
+      })
+
+      const workspaceId =
+        activeWorkspace?.id || activeWorkspace?._id
+
+      navigate(
+        workspaceId
+          ? `/dashboard?workspace=${workspaceId}&company=${company.id}`
+          : '/dashboard'
+      )
+
+      return
+    }
+
+    await selectCompany(company)
   }
 
   function handleFileChange(selectedFile) {
@@ -155,7 +319,16 @@ function DocumentUpload() {
         redFlags: redFlagRes.data,
       })
 
-      setTimeout(() => navigate('/dashboard'), 600)
+      setTimeout(() => {
+        const workspaceId =
+          activeWorkspace?.id || activeWorkspace?._id
+
+        navigate(
+          workspaceId
+            ? `/dashboard?workspace=${workspaceId}&company=${activeCompany.id}`
+            : '/dashboard'
+        )
+      }, 600)
     } catch (err) {
       setPipelineError(err.response?.data?.detail || 'Pipeline failed — please try again.')
       setPipelineActive(false)
@@ -202,36 +375,124 @@ function DocumentUpload() {
             </button>
           </div>
 
-          {companies.length > 0 && (
+          {companies.length > 0 ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {companies.map((c) => {
                 const status = docStatusByCompany[c.id]
                 const isSelected = activeCompany?.id === c.id
+                const isEditing = editingCompanyId === c.id
+                const isDeleting = deletingCompanyId === c.id
+
+                if (isEditing) {
+                  return (
+                    <form
+                      key={c.id}
+                      onSubmit={(e) => handleRenameSubmit(e, c.id)}
+                      className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border border-blue-400 bg-blue-50/60"
+                    >
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <input
+                          autoFocus
+                          type="text"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          placeholder="Company name"
+                          className="w-full bg-white border border-blue-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900"
+                        />
+                        <input
+                          type="text"
+                          value={editTicker}
+                          onChange={(e) => setEditTicker(e.target.value.toUpperCase())}
+                          placeholder="Ticker"
+                          maxLength={10}
+                          className="w-full bg-white border border-blue-300 rounded-lg px-2 py-1 text-[10px] text-slate-500"
+                        />
+                      </div>
+                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                        <button
+                          type="submit"
+                          disabled={renaming || !editName.trim() || !editTicker.trim()}
+                          className="text-[10px] font-bold text-blue-600 hover:underline disabled:opacity-50 whitespace-nowrap"
+                        >
+                          {renaming ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          className="text-[10px] font-semibold text-slate-400 hover:underline whitespace-nowrap"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  )
+                }
+
                 return (
-                  <button
+                  <div
                     key={c.id}
-                    type="button"
-                    onClick={() => selectCompany(c)}
-                    className={`flex items-center justify-between px-3.5 py-2.5 rounded-xl border text-left transition-colors ${
+                    className={`group flex items-center justify-between px-3.5 py-2.5 rounded-xl border transition-colors ${
                       isSelected
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
                     }`}
                   >
-                    <div>
-                      <div className="text-xs font-bold text-slate-900">{c.name}</div>
+                    <button
+                      type="button"
+                      onClick={() => handleCompanySelect(c)}
+                      className="flex-1 min-w-0 text-left"
+                    >
+                      <div className="text-xs font-bold text-slate-900 truncate">{c.name}</div>
                       <div className="text-[10px] text-slate-400">{c.ticker}</div>
+                    </button>
+
+                    <div className="flex items-center gap-1.5 pl-2 flex-shrink-0">
+                      {status ? (
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 whitespace-nowrap">
+                          <Check size={12} /> {status}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-semibold text-slate-400 whitespace-nowrap">No document</span>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          startRename(c)
+                        }}
+                        title="Rename company"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-slate-200 text-slate-400 hover:text-blue-600"
+                      >
+                        <Pencil size={12} />
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isDeleting}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleDeleteCompany(c)
+                        }}
+                        title="Delete company"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-rose-100 text-slate-400 hover:text-rose-600 disabled:opacity-100 disabled:cursor-not-allowed"
+                      >
+                        {isDeleting ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={12} />
+                        )}
+                      </button>
                     </div>
-                    {status ? (
-                      <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-600">
-                        <Check size={12} /> {status}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-semibold text-slate-400">No document</span>
-                    )}
-                  </button>
+                  </div>
                 )
               })}
+            </div>
+          ) : (
+            <div className="py-6 text-center rounded-xl border border-dashed border-slate-200 bg-slate-50/50">
+              <p className="text-xs font-semibold text-slate-500">
+                Loading companies in this session...
+              </p>
             </div>
           )}
 

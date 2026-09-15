@@ -13,6 +13,10 @@ export function getDocument(documentId) {
   return axiosClient.get(`/documents/${documentId}`)
 }
 
+export function deleteDocument(documentId) {
+  return axiosClient.delete(`/documents/${documentId}`)
+}
+
 export function linkDocumentToCompany(documentId, companyId) {
   return axiosClient.patch(`/documents/${documentId}/link-company`, { company_id: companyId })
 }

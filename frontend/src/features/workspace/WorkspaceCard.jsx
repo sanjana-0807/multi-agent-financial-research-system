@@ -1,4 +1,4 @@
-import { FolderKanban, FileText, Clock, ArrowRight, Sparkles, Trash2 } from 'lucide-react'
+import { FolderKanban,Clock, ArrowRight, Sparkles, Trash2 } from 'lucide-react'
 import { formatDate } from '../../utils/formatDate.js'
 
 function WorkspaceCard({ workspace, onClick, onDelete }) {
@@ -46,10 +46,7 @@ function WorkspaceCard({ workspace, onClick, onDelete }) {
       {/* Metadata Footer */}
       <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs font-semibold text-slate-400">
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1 text-slate-600">
-            <FileText size={13} className="text-blue-500" />
-            {workspace.document_count ?? (workspace.documents?.length || 0)} Disclosures
-          </span>
+          
           <span className="flex items-center gap-1 text-slate-400">
             <Clock size={13} />
             {formatDate(workspace.created_at)}

@@ -7,17 +7,10 @@ from models.workspace import Workspace
 from models.user import User
 from models.company import Company
 from models.document import DocumentModel
-from schemas.workspace_schema import WorkspaceCreate, WorkspaceResponse
+from schemas.workspace_schema import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
 
 
 async def _document_count_for_workspace(workspace_id) -> int:
-    """
-    Count documents belonging to companies inside a workspace.
-
-    Relationship:
-        Workspace -> Company -> Document
-    """
-
     companies = await Company.find(
         Company.workspace_id == workspace_id
     ).to_list()
@@ -27,11 +20,14 @@ async def _document_count_for_workspace(workspace_id) -> int:
 
     company_ids = [str(company.id) for company in companies]
 
-    return await DocumentModel.find(
+    docs = await DocumentModel.find(
         {
-            "company_id": {"$in": company_ids}
+            "company_id": {"$in": company_ids},
+            "status": "indexed",
         }
-    ).count()
+    ).to_list()
+
+    return len({doc.company_id for doc in docs})
 
 
 async def _to_response(ws: Workspace) -> WorkspaceResponse:
@@ -39,12 +35,7 @@ async def _to_response(ws: Workspace) -> WorkspaceResponse:
 
     data["id"] = str(ws.id)
     data["owner_id"] = str(ws.owner_id)
-
-    # Add the actual number of uploaded documents
-    # belonging to companies in this workspace.
-    data["document_count"] = await _document_count_for_workspace(
-        ws.id
-    )
+    data["document_count"] = await _document_count_for_workspace(ws.id)
 
     return WorkspaceResponse.model_validate(data)
 
@@ -84,35 +75,19 @@ async def get_workspace(
     workspace_id: str,
     current_user: User,
 ) -> Workspace:
-    """
-    Returns the raw Workspace document.
-
-    Other services can reuse this for ownership checks
-    before accessing Company/Document records.
-    """
 
     try:
         obj_id = PydanticObjectId(workspace_id)
-
     except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid workspace id",
-        )
+        raise HTTPException(status_code=400, detail="Invalid workspace id")
 
     ws = await Workspace.get(obj_id)
 
     if not ws:
-        raise HTTPException(
-            status_code=404,
-            detail="Workspace not found",
-        )
+        raise HTTPException(status_code=404, detail="Workspace not found")
 
     if ws.owner_id != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have access to this workspace",
-        )
+        raise HTTPException(status_code=403, detail="You do not have access to this workspace")
 
     return ws
 
@@ -122,12 +97,67 @@ async def get_workspace_response(
     current_user: User,
 ) -> WorkspaceResponse:
 
-    ws = await get_workspace(
-        workspace_id,
-        current_user,
-    )
+    ws = await get_workspace(workspace_id, current_user)
+    return await _to_response(ws)
+
+
+async def update_workspace(
+    workspace_id: str,
+    payload: WorkspaceUpdate,
+    current_user: User,
+) -> WorkspaceResponse:
+
+    ws = await get_workspace(workspace_id, current_user)
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    for field, value in update_data.items():
+        setattr(ws, field, value)
+
+    ws.updated_at = datetime.now(timezone.utc)
+
+    await ws.save()
 
     return await _to_response(ws)
+
+
+async def list_workspace_documents(
+    workspace_id: str,
+    current_user: User,
+) -> list[dict]:
+    """
+    Return every document belonging to companies inside this
+    workspace, for the Settings > Manage Disclosures modal.
+    """
+
+    ws = await get_workspace(workspace_id, current_user)  # ownership check
+
+    companies = await Company.find(
+        Company.workspace_id == ws.id
+    ).to_list()
+
+    if not companies:
+        return []
+
+    company_ids = [str(company.id) for company in companies]
+
+    documents = await DocumentModel.find(
+        {"company_id": {"$in": company_ids}}
+    ).sort("-created_at").to_list()
+
+    return [
+        {
+            "document_id": doc.document_id,
+            "filename": doc.filename,
+            "file_size": doc.file_size,
+            "page_count": doc.page_count,
+            "chunk_count": doc.chunk_count,
+            "status": doc.status,
+            "company_id": doc.company_id,
+            "created_at": doc.created_at,
+        }
+        for doc in documents
+    ]
 
 
 async def delete_workspace(
@@ -135,11 +165,5 @@ async def delete_workspace(
     current_user: User,
 ) -> None:
 
-    ws = await get_workspace(
-        workspace_id,
-        current_user,
-    )
-
-    # NOTE: this does not cascade-delete Companies/Documents
-    # that reference this workspace through their company.
+    ws = await get_workspace(workspace_id, current_user)
     await ws.delete()

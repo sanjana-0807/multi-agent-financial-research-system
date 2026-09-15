@@ -105,7 +105,16 @@ async def get_document(
         "updated_at": document.updated_at,
     }
 
-
+@router.delete("/{document_id}", status_code=204)
+async def delete_document(
+    document_id: str,
+    current_user=Depends(get_current_user),
+):
+    """
+    Delete a document: removes its ChromaDB chunks, its file on
+    disk, and its MongoDB record.
+    """
+    await DocumentService.delete_document(document_id)
 # ============================================================
 # GET DOCUMENT CHUNKS
 # ============================================================

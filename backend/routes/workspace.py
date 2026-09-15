@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from schemas.workspace_schema import WorkspaceCreate, WorkspaceResponse
+from schemas.workspace_schema import WorkspaceCreate, WorkspaceUpdate, WorkspaceResponse
 from services import workspace_service
 from core.dependencies import get_current_user
 
@@ -28,6 +28,23 @@ async def get_workspace(
     current_user=Depends(get_current_user),
 ):
     return await workspace_service.get_workspace_response(workspace_id, current_user)
+
+
+@router.patch("/{workspace_id}", response_model=WorkspaceResponse)
+async def update_workspace(
+    workspace_id: str,
+    payload: WorkspaceUpdate,
+    current_user=Depends(get_current_user),
+):
+    return await workspace_service.update_workspace(workspace_id, payload, current_user)
+
+
+@router.get("/{workspace_id}/documents")
+async def get_workspace_documents(
+    workspace_id: str,
+    current_user=Depends(get_current_user),
+):
+    return await workspace_service.list_workspace_documents(workspace_id, current_user)
 
 
 @router.delete("/{workspace_id}", status_code=204)
