@@ -93,7 +93,7 @@ function Sidebar() {
           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100"
         >
           <SettingsIcon size={14} className="text-slate-400" />
-          <span>Settings & Preferences</span>
+          <span>Session Settings</span>
         </button>
       </div>
 
