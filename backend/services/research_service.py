@@ -72,6 +72,126 @@ def _extract_years(question: str) -> list[int]:
     )
 
 
+def _extract_report_fiscal_year(
+    document: Any,
+    document_id: str,
+) -> int | None:
+    """Resolve the primary fiscal year represented by the uploaded report.
+
+    The report year is document metadata, not the current calendar year.
+    Prefer an explicit fiscal-year statement from the indexed document, then
+    fall back to filename/title metadata. This prevents a 2025 annual report
+    from being answered with live 2026 figures when the user omits a year.
+    """
+    metadata_values: list[str] = []
+    for field in (
+        "company_name", "company", "issuer_name", "organization_name",
+        "issuer", "name", "title", "filename", "file_name",
+        "original_filename",
+    ):
+        value = getattr(document, field, None)
+        if value:
+            metadata_values.append(_clean(value))
+
+    # First, use explicit fiscal-year wording from metadata/title when present.
+    fiscal_patterns = (
+        r"(?i)fiscal\s+year\s+ended[^0-9]{0,40}(20\d{2})",
+        r"(?i)year\s+ended[^0-9]{0,40}(20\d{2})",
+        r"(?i)(?:annual\s+report|10[- ]?k)[^0-9]{0,20}(20\d{2})",
+    )
+    for value in metadata_values:
+        for pattern in fiscal_patterns:
+            match = re.search(pattern, value)
+            if match:
+                return int(match.group(1))
+
+    # The most authoritative fallback is the actual report text. Only inspect
+    # the first portion of the document so this remains cheap.
+    chunks = _get_all_document_chunks(document_id)
+    for item in chunks[:60]:
+        text = item.get("text", "") or ""
+        if not text:
+            continue
+        for pattern in fiscal_patterns[:2]:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+
+    # Finally, filenames such as Amazon-2025-Annual-Report.pdf. Prefer a year
+    # adjacent to annual-report/10-K rather than an arbitrary filing year.
+    for value in metadata_values:
+        match = re.search(
+            r"(?i)(20\d{2})(?=[-_ ]*(?:annual[-_ ]?report|10[-_ ]?k|form[-_ ]?10[-_ ]?k))",
+            value,
+        )
+        if match:
+            return int(match.group(1))
+        years = re.findall(r"\b20\d{2}\b", value)
+        if years:
+            return int(years[-1])
+
+    return None
+
+
+def _apply_report_year_defaults(
+    question: str,
+    report_year: int | None,
+) -> str:
+    """Apply the report fiscal year when a financial year is not specified.
+
+    Explicit years always win. Explicit current-time requests such as
+    'this year'/'current year' are also left untouched so they can use the
+    current-information path. Generic financial questions default to the
+    uploaded report's primary fiscal year.
+    """
+    if not question or not report_year or _extract_years(question):
+        return question
+
+    text = question.lower()
+
+    current_markers = (
+        "this year",
+        "current year",
+        "current fiscal year",
+        "today",
+        "today's",
+        "right now",
+    )
+    if any(marker in text for marker in current_markers):
+        return question
+
+    # If the user explicitly asks for a relative previous/prior/last year
+    # without history, interpret it relative to the uploaded report year.
+    previous_markers = (
+        "previous year",
+        "prior year",
+        "last year",
+        "preceding year",
+        "previous fiscal year",
+        "prior fiscal year",
+        "last fiscal year",
+    )
+    if any(marker in text for marker in previous_markers):
+        return f"{question} (use fiscal year {report_year - 1})"
+
+    # Generic financial/profile questions should stay tied to the uploaded
+    # report. The caller only invokes this for financial questions.
+    return f"{question} (use fiscal year {report_year})"
+
+
+def _apply_percentage_year_defaults(
+    question: str,
+    report_year: int | None,
+) -> str:
+    """Default an unqualified percentage-change question to report vs prior year."""
+    if not question or not report_year or _extract_years(question):
+        return question
+    text = question.lower()
+    if any(marker in text for marker in ("this year", "current year", "current fiscal year")):
+        return question
+    return f"{question} (calculate from fiscal year {report_year - 1} to fiscal year {report_year})"
+
+
 def _get_last_user_question(
     history: list[dict],
 ) -> str | None:
@@ -331,6 +451,176 @@ def _is_financial_question(
 # PROFILE RETRIEVAL QUERIES
 # ============================================================
 
+def _company_identity_candidates(document: Any, document_id: str) -> list[str]:
+    """Collect company identifiers, preferring legal issuer identity over filenames."""
+    candidates: list[str] = []
+
+    # Explicit metadata has highest priority.
+    for field in (
+        "company_name",
+        "issuer_name",
+        "organization_name",
+        "company",
+        "issuer",
+    ):
+        value = getattr(document, field, None)
+        if value:
+            candidates.append(_clean(value))
+
+    # Inspect the beginning of the indexed report for the legal registrant.
+    chunks = _get_all_document_chunks(document_id)
+    for item in chunks[:60]:
+        text = item.get("text", "") or ""
+        if not text:
+            continue
+        patterns = (
+            r"(?i)exact\s+name\s+of\s+registrant[^\n:]*[:\-]\s*([^\n]+)",
+            r"(?i)registrant\s+name[^\n:]*[:\-]\s*([^\n]+)",
+            r"(?im)^\s*([A-Z][A-Z0-9.&' -]{2,80}?(?:,?\s+(?:INC\.?|CORP\.?|CORPORATION|PLC|LTD\.?|LIMITED)))\s*$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                candidates.append(re.sub(r"\s+", " ", match.group(1)).strip(" .,:;-_"))
+
+    # Filename/title is a lower-priority fallback.
+    for field in ("name", "title", "filename", "file_name", "original_filename"):
+        value = getattr(document, field, None)
+        if value:
+            candidates.append(_clean(value))
+    if document_id:
+        candidates.append(_clean(document_id))
+
+    cleaned: list[str] = []
+    for value in candidates:
+        value = re.sub(r"\.(pdf|txt|docx?|xlsx?)$", "", value, flags=re.I)
+        # Strip upload prefixes/IDs and report descriptors.
+        value = re.sub(r"^[A-Fa-f0-9]{8,}[-_ ]+", "", value)
+        value = re.sub(
+            r"[-_ ]?(?:19|20)\d{2}[-_ ]?(?:annual[-_ ]?report|10[-_ ]?k|form[-_ ]?10[-_ ]?k).*?$",
+            "", value, flags=re.I,
+        )
+        value = re.sub(r"[-_]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip(" -_")
+        if value:
+            cleaned.append(value)
+
+    # Normalize obvious legal forms and prefer a short issuer name.
+    normalized: list[str] = []
+    for value in cleaned:
+        value = re.sub(r"\s+", " ", value).strip()
+        if value.lower() in {"document", "annual report", "10 k", "form 10 k"}:
+            continue
+        normalized.append(value)
+
+    return list(dict.fromkeys(normalized))
+
+
+def _extract_company_name_from_document(
+    document: Any,
+    document_id: str,
+) -> str | None:
+    """Resolve the active company from the uploaded document, not generic web popularity."""
+    candidates = _company_identity_candidates(document, document_id)
+
+    # Strong known issuer patterns.
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if "amazon.com" in normalized or normalized.startswith("amazon"):
+            return "Amazon"
+        if "alphabet" in normalized or normalized.startswith("google"):
+            return "Google"
+        if "apple" in normalized:
+            return "Apple"
+        if "microsoft" in normalized:
+            return "Microsoft"
+        if "meta platforms" in normalized or normalized.startswith("meta"):
+            return "Meta"
+        if "tesla" in normalized:
+            return "Tesla"
+        if "nvidia" in normalized:
+            return "NVIDIA"
+
+    # Legal issuer line is usually already a usable company name.
+    for candidate in candidates:
+        if re.search(r"(?i)\b(?:inc|inc\.|corp|corporation|plc|ltd|limited)\b", candidate):
+            return candidate
+
+    # Filename fallback, e.g. Amazon-2025-Annual-Report.
+    for candidate in candidates:
+        if len(candidate.split()) <= 8 and not re.fullmatch(r"[A-Fa-f0-9]{8,}", candidate):
+            return candidate
+
+    return None
+
+def _company_search_query(
+    question: str,
+    company_name: str | None,
+) -> str:
+    """Make profile web searches explicitly company-scoped."""
+    if not company_name:
+        return question
+
+    text = question.strip()
+    # Replace vague references so the search engine cannot choose another
+    # company merely because it is more prominent for the wording.
+    text = re.sub(
+        r"\b(the company|this company|the organization|this organization)\b",
+        company_name,
+        text,
+        flags=re.I,
+    )
+
+    if company_name.lower() not in text.lower():
+        return f"{company_name}: {text}"
+    return text
+
+
+def _web_result_matches_company(
+    result: dict,
+    company_name: str | None,
+) -> bool:
+    """Reject external results that are clearly about another company."""
+    if not company_name:
+        return False
+
+    target = re.sub(r"[^a-z0-9]+", " ", company_name.lower()).strip()
+    target_tokens = [
+        token for token in target.split()
+        if token not in {
+            "inc", "incorporated", "corp", "corporation", "plc",
+            "ltd", "limited", "company", "com", "the",
+        }
+    ]
+    if not target_tokens:
+        return False
+
+    haystack = " ".join(
+        str(result.get(key, "") or "")
+        for key in ("title", "content", "url")
+    ).lower()
+    haystack = re.sub(r"[^a-z0-9]+", " ", haystack)
+
+    # Common legal/brand aliases. This is deliberately conservative: a result
+    # must contain the active company's meaningful brand token.
+    aliases = {
+        "amazon": ("amazon", "amazon com"),
+        "google": ("google", "alphabet"),
+        "alphabet": ("alphabet", "google"),
+        "meta": ("meta", "facebook", "meta platforms"),
+        "microsoft": ("microsoft",),
+        "apple": ("apple",),
+        "tesla": ("tesla",),
+        "nvidia": ("nvidia",),
+    }
+
+    meaningful = target_tokens[0]
+    if meaningful in aliases:
+        return any(alias in haystack for alias in aliases[meaningful])
+
+    # Unknown multi-word companies must match every meaningful token.
+    return all(token in haystack for token in target_tokens)
+
 def _build_profile_queries(
     question: str,
 ) -> list[str]:
@@ -371,7 +661,7 @@ def _build_profile_queries(
     # CEO
     # --------------------------------------------------------
 
-    elif (
+    if (
         "ceo" in text
         or "chief executive" in text
     ):
@@ -391,7 +681,7 @@ def _build_profile_queries(
     # Employees
     # --------------------------------------------------------
 
-    elif (
+    if (
         "employee" in text
         or "workforce" in text
         or "headcount" in text
@@ -413,7 +703,7 @@ def _build_profile_queries(
     # Headquarters
     # --------------------------------------------------------
 
-    elif (
+    if (
         "headquarters" in text
         or "headquartered" in text
         or "head office" in text
@@ -482,166 +772,116 @@ def _build_profile_queries(
 # PROFILE CONTENT VALIDATION
 # ============================================================
 
+def _fast_extract_employee_fact(
+    document_id: str,
+    requested_year: int | None = None,
+    report_year: int | None = None,
+) -> tuple[int | None, dict | None, int | None]:
+    """Extract the reported employee headcount from the uploaded document.
+
+    This deliberately prefers an exact human-capital disclosure over semantic
+    matches or current web numbers.  If no year is requested, the report's
+    fiscal year is used.  A different year is returned only when that year is
+    explicitly present in the document text.
+    """
+    target_year = requested_year or report_year
+    if not target_year:
+        return None, None, None
+
+    chunks = _get_all_document_chunks(document_id)
+    candidates = []
+    for item in chunks:
+        text = item.get("text", "") or ""
+        if not text or not re.search(r"(?i)\b(?:employees|workforce|personnel)\b", text):
+            continue
+
+        patterns = [
+            # Amazon-style: As of December 31, 2025, we employed approximately 1,576,000...
+            rf"(?is)as\s+of\s+(?:december|january|february|march|april|may|june|july|august|september|october|november)\s+\d{{1,2}},?\s+{target_year}\D{{0,100}}?(?:employed|employees|workforce)\D{{0,80}}?(\d{{1,3}}(?:,\d{{3}})+|\d+)\b",
+            # Generic: approximately 1,576,000 full-time and part-time employees as of ... 2025
+            rf"(?is)(\d{{1,3}}(?:,\d{{3}})+|\d+)\s+(?:full[- ]time\s+and\s+part[- ]time\s+)?employees\D{{0,100}}?{target_year}\b",
+            # Generic year-near-headcount disclosure.
+            rf"(?is){target_year}\D{{0,80}}?(\d{{1,3}}(?:,\d{{3}})+|\d+)\s+employees\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            raw = match.group(1).replace(",", "")
+            try:
+                value = int(raw)
+            except ValueError:
+                continue
+            # Reject implausibly small values and dates.
+            if value < 1000 or value > 10000000:
+                continue
+            source = dict(item)
+            source["text"] = text
+            candidates.append((value, source))
+            break
+
+    if not candidates:
+        return None, None, target_year
+
+    # Prefer exact report-year disclosure and human-capital language.
+    value, source = candidates[0]
+    return value, source, target_year
+
+
+def _fast_extract_founder_fact(
+    document_id: str,
+    company_name: str | None = None,
+) -> tuple[str | None, dict | None]:
+    """Extract founder names from explicit founding statements in the report."""
+    chunks = _get_all_document_chunks(document_id)
+    company = re.escape(company_name or "")
+    patterns = []
+    if company:
+        patterns.extend([
+            rf"(?is)([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){{1,4}})\s+(?:and\s+([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){{1,4}})\s+)?(?:co-)?founded\s+(?:{company}|the\s+company)",
+            rf"(?is)([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){{1,4}})\.[\s\S]{{0,80}}?(?:Mr\.|Ms\.)?\s*[A-Z][A-Za-z.]+\s+founded\s+(?:{company}|the\s+company)",
+        ])
+    patterns.append(r"(?is)([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){1,4})\s+(?:and\s+([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){1,4})\s+)?(?:co-)?founded\s+(?:the\s+company|the\s+organization)")
+
+    for item in chunks:
+        text = item.get("text", "") or ""
+        if not re.search(r"(?i)\bfound(?:ed|er|ers|ing)\b", text):
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            names = [g.strip(" .") for g in match.groups() if g and len(g.strip()) > 2]
+            if names:
+                return " and ".join(dict.fromkeys(names)), dict(item)
+    return None, None
+
+
 def _profile_content_matches(
     question: str,
     text: str,
 ) -> bool:
-
     if not text:
         return False
 
-    normalized = re.sub(
-        r"\s+",
-        " ",
-        text.lower(),
-    )
-
+    normalized = re.sub(r"\s+", " ", text.lower())
     question_text = question.lower()
 
-    # --------------------------------------------------------
-    # Headquarters
-    # --------------------------------------------------------
+    checks = []
+    if any(x in question_text for x in ("headquarters", "headquartered", "head office", "principal executive office")):
+        checks.append(("headquarters", ("headquartered", "headquarters", "head office", "principal executive office", "principal office", "corporate headquarters")))
+    if any(x in question_text for x in ("founder", "founded", "founding")):
+        checks.append(("founder", ("founded", "founder", "founders", "co-founded", "cofounder", "established", "formed", "incorporated")))
+    if any(x in question_text for x in ("ceo", "chief executive")):
+        checks.append(("ceo", ("chief executive officer", "chief executive", "ceo")))
+    if any(x in question_text for x in ("employee", "workforce", "headcount", "staff")):
+        checks.append(("employees", ("employees", "employee", "workforce", "headcount", "personnel", "people employed")))
+    if any(x in question_text for x in ("management", "leadership", "executive")):
+        checks.append(("management", ("management", "executive officer", "executive officers", "leadership", "senior management")))
+    if any(x in question_text for x in ("business", "business model", "what does the company do")):
+        checks.append(("business", ("our business", "the company's business", "principal business", "business operations", "business activities", "products and services")))
 
-    if (
-        "headquarters" in question_text
-        or "headquartered" in question_text
-        or "head office" in question_text
-        or "principal executive office" in question_text
-    ):
-
-        patterns = (
-            "headquartered",
-            "headquarters",
-            "head office",
-            "principal executive office",
-            "principal office",
-            "corporate headquarters",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    # --------------------------------------------------------
-    # Founder
-    # --------------------------------------------------------
-
-    if (
-        "founder" in question_text
-        or "founded" in question_text
-        or "founding" in question_text
-    ):
-
-        patterns = (
-            "founded",
-            "founder",
-            "founders",
-            "co-founded",
-            "cofounder",
-            "established",
-            "formed",
-            "incorporated",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    # --------------------------------------------------------
-    # CEO
-    # --------------------------------------------------------
-
-    if (
-        "ceo" in question_text
-        or "chief executive" in question_text
-    ):
-
-        patterns = (
-            "chief executive officer",
-            "chief executive",
-            "ceo",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    # --------------------------------------------------------
-    # Employees
-    # --------------------------------------------------------
-
-    if (
-        "employee" in question_text
-        or "workforce" in question_text
-        or "headcount" in question_text
-        or "staff" in question_text
-    ):
-
-        patterns = (
-            "employees",
-            "employee",
-            "workforce",
-            "headcount",
-            "personnel",
-            "people employed",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    # --------------------------------------------------------
-    # Management
-    # --------------------------------------------------------
-
-    if (
-        "management" in question_text
-        or "leadership" in question_text
-        or "executive" in question_text
-    ):
-
-        patterns = (
-            "management",
-            "executive officer",
-            "executive officers",
-            "leadership",
-            "senior management",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    # --------------------------------------------------------
-    # Business
-    # --------------------------------------------------------
-
-    if (
-        "business" in question_text
-        or "business model" in question_text
-        or "what does the company do" in question_text
-    ):
-
-        patterns = (
-            "our business",
-            "the company's business",
-            "principal business",
-            "business operations",
-            "business activities",
-            "products and services",
-        )
-
-        return any(
-            pattern in normalized
-            for pattern in patterns
-        )
-
-    return False
+    return any(any(pattern in normalized for pattern in patterns) for _, patterns in checks)
 
 
 def _select_profile_evidence(
@@ -698,18 +938,45 @@ def _get_metric(
 
     text = question.lower()
 
+    # EPS is checked before generic "earnings" so phrases such as
+    # "earnings per share" are never classified as net income.
+    if (
+        "diluted eps" in text
+        or "diluted earnings per share" in text
+    ):
+        return "Diluted EPS"
+
+    if (
+        "basic eps" in text
+        or "basic earnings per share" in text
+    ):
+        return "Basic EPS"
+
+    # Revenue / sales aliases.  "Annual income" is a common business
+    # wording for annual/top-line income; it is treated as revenue only
+    # when it is not explicitly qualified as net/profit income.
     if (
         "total revenue" in text
         or "total revenues" in text
         or "revenue" in text
         or "revenues" in text
         or "net sales" in text
+        or "annual sales" in text
+        or "yearly sales" in text
+        or "sales revenue" in text
+        or "annual income" in text
+        or "yearly income" in text
+        or "annual turnover" in text
+        or "turnover" in text
+        or "top line" in text
     ):
         return "Total revenues"
 
     if (
         "net income" in text
         or "net profit" in text
+        or "net earnings" in text
+        or re.search(r"\bearnings\b", text)
     ):
         return "Net income"
 
@@ -722,6 +989,43 @@ def _get_metric(
         or "income from operations" in text
     ):
         return "Income from operations"
+
+    if (
+        "total assets" in text
+        or "assets" in text and "total" in text
+    ):
+        return "Total assets"
+
+    if (
+        "total liabilities" in text
+        or "liabilities" in text and "total" in text
+    ):
+        return "Total liabilities"
+
+    if (
+        "cash and cash equivalents" in text
+        or "cash & cash equivalents" in text
+        or "cash equivalents" in text
+    ):
+        return "Cash and cash equivalents"
+
+    if (
+        "operating cash flow" in text
+        or "cash flow from operations" in text
+        or "net cash provided by operating activities" in text
+    ):
+        return "Operating cash flow"
+
+    if (
+        "free cash flow" in text
+    ):
+        return "Free cash flow"
+
+    if "operating expenses" in text or "operating expense" in text:
+        return "Operating expenses"
+
+    if "cost of revenue" in text or "cost of sales" in text:
+        return "Cost of revenue"
 
     return None
 
@@ -824,6 +1128,423 @@ def _extract_financial_value(
         year,
         metric,
     )
+
+
+# ============================================================
+# FAST DOCUMENT-LOCAL FINANCIAL EXTRACTION
+# ============================================================
+
+_FINANCIAL_STATEMENT_HINTS = {
+    "Total revenues": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "consolidated statement of operations",
+        "consolidated income statement",
+        "year ended",
+        "net sales",
+        "total revenues",
+        "sales revenue",
+        "turnover",
+    ),
+    "Net income": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "consolidated statement of operations",
+        "net income",
+        "net earnings",
+    ),
+    "Gross profit": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "consolidated statement of operations",
+        "gross profit",
+    ),
+    "Income from operations": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "consolidated statement of operations",
+        "income from operations",
+        "operating income",
+    ),
+    "Total assets": (
+        "consolidated balance sheets",
+        "consolidated balance sheet",
+        "total assets",
+    ),
+    "Total liabilities": (
+        "consolidated balance sheets",
+        "consolidated balance sheet",
+        "total liabilities",
+    ),
+    "Cash and cash equivalents": (
+        "consolidated balance sheets",
+        "consolidated balance sheet",
+        "cash and cash equivalents",
+    ),
+    "Operating cash flow": (
+        "consolidated statements of cash flows",
+        "consolidated statement of cash flows",
+        "cash flows from operating activities",
+        "operating activities",
+    ),
+    "Diluted EPS": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "earnings per share",
+        "diluted earnings per share",
+    ),
+    "Basic EPS": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "earnings per share",
+        "basic earnings per share",
+    ),
+    "Operating expenses": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "operating expenses",
+    ),
+    "Cost of revenue": (
+        "consolidated statements of income",
+        "consolidated statement of income",
+        "consolidated statements of operations",
+        "cost of sales",
+        "cost of revenue",
+    ),
+}
+
+
+def _is_direct_financial_fact(question: str) -> bool:
+    """True for questions that can be answered from one document fact."""
+    if not question or not _get_metric(question):
+        return False
+
+    # By the time this helper runs, unqualified financial questions have been
+    # resolved to the uploaded report fiscal year. Explicit years are already
+    # present too. Current-time questions intentionally remain on the live/web
+    # path instead of being forced into the report.
+    lower = question.lower()
+    if not _extract_years(question):
+        return False
+    complex_markers = (
+        "why ", "why did", "explain", "reason", "trend", "compare",
+        "comparison", "increase by", "decrease by", "growth", "margin",
+        "ratio", "forecast", "predict", "outlook", "how did",
+    )
+    return not any(marker in lower for marker in complex_markers)
+
+
+def _financial_metric_aliases(metric: str) -> tuple[str, ...]:
+    return {
+        "Total revenues": (
+            "total revenue", "total revenues", "revenue", "revenues",
+            "net sales", "annual sales", "sales revenue", "turnover",
+        ),
+        "Net income": ("net income", "net profit", "net earnings", "earnings"),
+        "Gross profit": ("gross profit",),
+        "Income from operations": ("income from operations", "operating income", "operating profit"),
+        "Total assets": ("total assets",),
+        "Total liabilities": ("total liabilities",),
+        "Cash and cash equivalents": ("cash and cash equivalents", "cash equivalents"),
+        "Operating cash flow": ("cash flows from operating activities", "operating cash flow", "net cash provided by operating activities"),
+        "Free cash flow": ("free cash flow",),
+        "Diluted EPS": ("diluted earnings per share", "diluted eps"),
+        "Basic EPS": ("basic earnings per share", "basic eps"),
+        "Operating expenses": ("operating expenses", "operating expense"),
+        "Cost of revenue": ("cost of sales", "cost of revenue"),
+    }.get(metric, (metric.lower(),))
+
+
+
+# ============================================================
+# ROBUST BALANCE-SHEET ROW / DERIVED METRIC EXTRACTION
+# ============================================================
+
+_BALANCE_SHEET_ROW_ALIASES = {
+    "Total assets": (
+        "total assets",
+    ),
+    "Total stockholders equity": (
+        "total stockholders’ equity",
+        "total stockholders' equity",
+        "total shareholders’ equity",
+        "total shareholders' equity",
+        "total equity",
+    ),
+    "Total current liabilities": (
+        "total current liabilities",
+    ),
+    "Long-term lease liabilities": (
+        "long-term lease liabilities",
+    ),
+    "Long-term debt": (
+        "long-term debt",
+    ),
+    "Other long-term liabilities": (
+        "other long-term liabilities",
+    ),
+}
+
+
+def _normalize_statement_text(text: str) -> str:
+    return re.sub(r"[ \t]+", " ", text.replace("\u00a0", " ")).strip()
+
+
+def _year_order_near_position(text: str, position: int) -> list[int]:
+    """Find the nearest plausible annual column ordering before a row."""
+    before = text[max(0, position - 1800):position]
+    years = [int(y) for y in re.findall(r"\b20\d{2}\b", before)]
+    # Prefer the last consecutive 2/3-year sequence.
+    for size in (3, 2):
+        for i in range(len(years) - size, -1, -1):
+            seq = years[i:i + size]
+            if len(set(seq)) != size:
+                continue
+            if all(abs(seq[j + 1] - seq[j]) == 1 for j in range(size - 1)):
+                return seq
+    unique = list(dict.fromkeys(years))
+    return unique[-3:]
+
+
+def _extract_labeled_balance_sheet_value(
+    chunks: list[dict],
+    label_aliases: tuple[str, ...],
+    year: int,
+) -> tuple[float | None, dict | None]:
+    """Extract a value from an exact balance-sheet row.
+
+    Unlike the generic calculator, this requires the requested label itself to
+    be adjacent to the candidate numbers. This prevents narrative values such
+    as Amazon's $87.339B long-term lease liability from being mistaken for
+    total liabilities.
+    """
+    candidates = []
+
+    label_pattern = "|".join(re.escape(x) for x in label_aliases)
+    label_re = re.compile(
+        rf"(?i)(?<![\w])(?:{label_pattern})(?![\w])"
+    )
+
+    for item in chunks:
+        raw = item.get("text", "") or ""
+        if not raw:
+            continue
+        text = _normalize_statement_text(raw)
+        lower = text.lower()
+
+        # Only consider actual balance-sheet contexts.
+        if not any(
+            marker in lower
+            for marker in (
+                "consolidated balance sheets",
+                "consolidated balance sheet",
+                "liabilities and stockholders",
+                "assets",
+            )
+        ):
+            continue
+
+        for match in label_re.finditer(text):
+            # Numbers immediately following the row label are the safest
+            # representation after PDF/table flattening.
+            tail = text[match.end():match.end() + 220]
+            numbers = _number_matches(tail)
+            if not numbers:
+                continue
+
+            values = [value for _, _, value in numbers[:5]]
+            year_order = _year_order_near_position(text, match.start())
+
+            # Most annual balance sheets contain exactly two year columns.
+            # If the header order is known, map by that order; otherwise use
+            # the common left-to-right ordering of the extracted row.
+            value = None
+            if year in year_order:
+                idx = year_order.index(year)
+                if idx < len(values):
+                    value = values[idx]
+            if value is None and len(values) >= 2:
+                # For two-column statements, requested latest year normally
+                # corresponds to the final value; older year to the first.
+                if year_order and year_order[-1] == year:
+                    value = values[-1]
+                elif year_order and year_order[0] == year:
+                    value = values[0]
+
+            if value is None:
+                continue
+
+            score = 0
+            if re.search(r"(?i)consolidated\s+balance\s+sheets?", text):
+                score += 500
+            if "liabilities and stockholders" in lower:
+                score += 200
+            if year in year_order:
+                score += 300
+            if len(values) >= 2:
+                score += 100
+            # Penalize obvious narrative prose after a label.
+            if any(token in tail.lower() for token in ("million", "billion")):
+                score += 10
+
+            candidates.append((score, item, value))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(
+        key=lambda x: (x[0], -(x[1].get("page") or 10**9)),
+        reverse=True,
+    )
+    _, source, value = candidates[0]
+    return float(value), source
+
+
+def _fast_extract_total_liabilities(
+    chunks: list[dict],
+    year: int,
+) -> tuple[float | None, dict | None]:
+    """Extract total liabilities without trusting unrelated liability values.
+
+    Many issuers do not print a literal `Total liabilities` row. In that case,
+    total liabilities can be derived from the balance sheet identity:
+
+        Total liabilities = Total assets - Total stockholders' equity
+
+    A component-sum fallback is used when equity is not available.
+    """
+    assets, asset_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Total assets"],
+        year,
+    )
+    equity, equity_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Total stockholders equity"],
+        year,
+    )
+
+    if assets is not None and equity is not None:
+        # Use the stronger source when available, but retain the balance-sheet
+        # source for citation. The value itself is independently derived.
+        source = asset_source or equity_source
+        derived = assets - equity
+        if derived >= 0:
+            return derived, source
+
+    # Fallback for statements that omit total equity but list liability rows.
+    current, current_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Total current liabilities"],
+        year,
+    )
+    lease, lease_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Long-term lease liabilities"],
+        year,
+    )
+    debt, debt_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Long-term debt"],
+        year,
+    )
+    other, other_source = _extract_labeled_balance_sheet_value(
+        chunks,
+        _BALANCE_SHEET_ROW_ALIASES["Other long-term liabilities"],
+        year,
+    )
+
+    components = [x for x in (current, lease, debt, other) if x is not None]
+    if len(components) >= 2:
+        sources = [x for x in (current_source, lease_source, debt_source, other_source) if x]
+        return sum(components), (sources[0] if sources else None)
+
+    return None, None
+
+
+def _fast_extract_financial_fact(
+    question: str,
+    document_id: str,
+) -> tuple[float | None, dict | None, int | None, str | None]:
+    """Extract a single financial fact directly from the document.
+
+    This deliberately bypasses semantic top-k retrieval for simple fact questions.
+    It avoids the failure mode where a nearby but unrelated number wins semantic
+    ranking (for example an $11M figure being returned for Amazon revenue).
+    """
+    metric = _get_metric(question)
+    years = _extract_years(question)
+    if not metric or not years:
+        return None, None, None, None
+
+    year = years[-1]
+    chunks = _get_all_document_chunks(document_id)
+
+    # Total liabilities is often NOT printed as a literal row. For example,
+    # Amazon's balance sheet lists total current liabilities and long-term
+    # liability components, then total stockholders' equity. Derive total
+    # liabilities from the balance-sheet identity instead of allowing a
+    # nearby liability number to be selected.
+    if metric == "Total liabilities" and chunks:
+        value, source = _fast_extract_total_liabilities(chunks, year)
+        if value is not None and source is not None:
+            return value, source, year, metric
+    if not chunks:
+        return None, None, year, metric
+
+    aliases = _financial_metric_aliases(metric)
+    hints = _FINANCIAL_STATEMENT_HINTS.get(metric, ())
+    candidates = []
+
+    for item in chunks:
+        text = item.get("text", "") or ""
+        lower = text.lower()
+        if not text or not any(alias in lower for alias in aliases):
+            continue
+
+        try:
+            value = extract_metric_value(text=text, metric=metric, year=year)
+        except Exception:
+            continue
+        if value is None:
+            continue
+
+        score = 0
+        for alias in aliases:
+            if re.search(rf"(?<![\\w]){re.escape(alias)}(?![\\w])", lower):
+                score += 80 if alias in ("total revenue", "total revenues", "net income", "total assets", "total liabilities") else 45
+                break
+        for hint in hints:
+            if hint in lower:
+                score += 70
+        if "year ended" in lower:
+            score += 40
+        if re.search(rf"\\b{year}\\b", text):
+            score += 40
+
+        # Prefer chunks where the metric and statement context occur together.
+        if any(hint in lower for hint in hints):
+            score += 100
+
+        candidates.append((score, item, float(value)))
+
+    if not candidates:
+        return None, None, year, metric
+
+    candidates.sort(
+        key=lambda candidate: (
+            candidate[0],
+            -(candidate[1].get("page") or 10**9),
+        ),
+        reverse=True,
+    )
+    _, source, value = candidates[0]
+    return value, source, year, metric
 
 
 # ============================================================
@@ -1722,6 +2443,20 @@ class ResearchService:
             resolved_question,
         )
 
+        # Resolve the uploaded report's fiscal year before classification.
+        # Generic financial questions must use the report year, not the live
+        # calendar year. Explicit years remain untouched.
+        report_year = _extract_report_fiscal_year(
+            document,
+            document_id,
+        )
+
+        if report_year:
+            print("Detected report fiscal year:", report_year)
+
+        company_name = _extract_company_name_from_document(document, document_id)
+        print("Detected active company:", company_name)
+
         # ====================================================
         # 6. CLASSIFY
         # ====================================================
@@ -1749,6 +2484,27 @@ class ResearchService:
                 resolved_question
             )
         )
+
+        # Unqualified financial questions are anchored to the uploaded report's
+        # primary fiscal year. Percentage questions default to report year vs
+        # prior fiscal year.
+        if percentage_question and report_year and not _extract_years(resolved_question):
+            resolved_question = _apply_percentage_year_defaults(
+                resolved_question,
+                report_year,
+            )
+            print("Report-year percentage resolution:", resolved_question)
+        elif financial_question and report_year and not _extract_years(resolved_question):
+            resolved_question = _apply_report_year_defaults(
+                resolved_question,
+                report_year,
+            )
+            print("Report-year financial resolution:", resolved_question)
+
+        # Recompute classifications after the resolution text is enriched.
+        percentage_question = _is_percentage_question(resolved_question)
+        financial_question = _is_financial_question(resolved_question)
+        current_question = _requires_current_information(resolved_question)
 
         # ====================================================
         # 7. PERCENTAGE QUESTIONS
@@ -1913,14 +2669,172 @@ class ResearchService:
         # ====================================================
 
         raw_evidence = []
+        founder_value = None
+        founder_source = None
+        employee_value = None
+        employee_source = None
+        employee_fact_year = None
 
         if profile_question:
+            profile_text = resolved_question.lower()
+            employee_requested_years = _extract_years(resolved_question)
+            employee_year = employee_requested_years[-1] if employee_requested_years else report_year
 
-            profile_queries = (
-                _build_profile_queries(
-                    resolved_question
+            if any(term in profile_text for term in ("employee", "workforce", "headcount", "staff")):
+                employee_value, employee_source, employee_fact_year = _fast_extract_employee_fact(
+                    document_id=document_id,
+                    requested_year=employee_year,
+                    report_year=report_year,
+                )
+                if employee_source is not None:
+                    employee_source = dict(employee_source)
+                    employee_source["distance"] = 0.0
+                    raw_evidence.append(employee_source)
+
+            if any(term in profile_text for term in ("founder", "founded", "founding")):
+                founder_value, founder_source = _fast_extract_founder_fact(
+                    document_id=document_id,
+                    company_name=company_name,
+                )
+                if founder_source is not None:
+                    founder_source = dict(founder_source)
+                    founder_source["distance"] = 0.0
+                    raw_evidence.append(founder_source)
+
+            # Fast profile path: if the uploaded report already contains every
+            # requested founder/employee fact, answer directly. This avoids
+            # dozens of semantic retrieval calls, web search, and an LLM call
+            # for simple factual questions.
+            asks_founder = any(
+                term in profile_text
+                for term in ("founder", "founded", "founding")
+            )
+            asks_employee = any(
+                term in profile_text
+                for term in ("employee", "workforce", "headcount", "staff")
+            )
+            asks_other_profile = any(
+                term in profile_text
+                for term in (
+                    "ceo",
+                    "chief executive",
+                    "headquarters",
+                    "head office",
+                    "management",
+                    "leadership",
                 )
             )
+
+            requested_profile_facts_available = (
+                (not asks_founder or founder_value)
+                and (not asks_employee or employee_value is not None)
+                and not asks_other_profile
+            )
+
+            if requested_profile_facts_available and (asks_founder or asks_employee):
+                parts = []
+
+                if founder_value:
+                    parts.append(
+                        f"{founder_value} is the founder of "
+                        f"{company_name or 'the company'}."
+                    )
+
+                if employee_value is not None:
+                    employee_part = (
+                        f"The company had approximately {employee_value:,} "
+                        f"full-time and part-time employees"
+                    )
+                    if employee_fact_year:
+                        employee_part += f" in {employee_fact_year}"
+                    employee_part += "."
+                    parts.append(employee_part)
+
+                answer = " ".join(parts)
+
+                pages = []
+                for source in (founder_source, employee_source):
+                    if source and source.get("page") is not None:
+                        pages.append(source.get("page"))
+
+                pages = list(dict.fromkeys(pages))
+                if pages:
+                    if len(pages) == 1:
+                        answer += f" [Page {pages[0]}]"
+                    else:
+                        answer += (
+                            " [Pages "
+                            + " and ".join(str(page) for page in pages)
+                            + "]"
+                        )
+
+                await _save_chat_message(
+                    conversation_id,
+                    document_id,
+                    "user",
+                    question,
+                )
+                await _save_chat_message(
+                    conversation_id,
+                    document_id,
+                    "assistant",
+                    answer,
+                )
+
+                return {
+                    "document_id": document_id,
+                    "question": question,
+                    "answer": answer,
+                    "conversation_id": conversation_id,
+                    "sources": _document_sources(
+                        [source for source in (founder_source, employee_source) if source]
+                    ),
+                }
+
+            # A direct employee-only question can be answered immediately from
+            # the report, avoiding stale/current web data and an unnecessary LLM call.
+            if (
+                employee_value is not None
+                and not asks_founder
+                and not asks_other_profile
+            ):
+                answer = (
+                    f"The company had approximately {employee_value:,} full-time and part-time employees"
+                    f" in {employee_fact_year}."
+                )
+                page = employee_source.get("page") if employee_source else None
+                if page is not None:
+                    answer += f" [Page {page}]"
+                await _save_chat_message(conversation_id, document_id, "user", question)
+                await _save_chat_message(conversation_id, document_id, "assistant", answer)
+                return {
+                    "document_id": document_id,
+                    "question": question,
+                    "answer": answer,
+                    "conversation_id": conversation_id,
+                    "sources": _document_sources([employee_source]),
+                }
+
+            profile_queries = _build_profile_queries(resolved_question)
+
+            # Keep fallback retrieval focused. The old path expanded a simple
+            # founder+employee question into many broad variants, which added
+            # substantial latency and increased the chance of unrelated matches.
+            if asks_founder or asks_employee:
+                focused_queries = []
+                if asks_founder:
+                    focused_queries.extend([
+                        f"Who founded {company_name or 'the company'}?",
+                        f"Who were the founders of {company_name or 'the company'}?",
+                        f"founder founding history of {company_name or 'the company'}",
+                    ])
+                if asks_employee:
+                    focused_queries.extend([
+                        f"How many employees does {company_name or 'the company'} have?",
+                        f"employee headcount of {company_name or 'the company'}",
+                        f"workforce of {company_name or 'the company'}",
+                    ])
+                profile_queries = focused_queries
 
             print()
             print(
@@ -1940,7 +2854,7 @@ class ResearchService:
                         retrieve_relevant_chunks(
                             query=query,
                             document_id=document_id,
-                            top_k=PROFILE_TOP_K,
+                            top_k=min(PROFILE_TOP_K, 8),
                         )
                     )
 
@@ -1989,6 +2903,52 @@ class ResearchService:
         # ====================================================
 
         else:
+
+            # Fast path for simple financial facts.  Do this BEFORE Chroma
+            # semantic retrieval so an unrelated nearby number cannot win.
+            if financial_question and _is_direct_financial_fact(resolved_question):
+                (
+                    direct_value,
+                    direct_source,
+                    direct_year,
+                    direct_metric,
+                ) = _fast_extract_financial_fact(
+                    resolved_question,
+                    document_id,
+                )
+
+                if direct_value is not None and direct_source is not None:
+                    if direct_metric == "Total revenues":
+                        answer = (
+                            f"The company's total revenue in {direct_year} was "
+                            f"${direct_value:,.0f} million "
+                            f"(${direct_value / 1000:,.3f} billion)."
+                        )
+                    elif direct_metric in ("Basic EPS", "Diluted EPS"):
+                        answer = (
+                            f"The company's {direct_metric.lower()} in {direct_year} was "
+                            f"${direct_value:,.2f}."
+                        )
+                    else:
+                        answer = (
+                            f"The company's {direct_metric.lower()} in {direct_year} was "
+                            f"${direct_value:,.0f} million."
+                        )
+
+                    page = direct_source.get("page")
+                    if page is not None:
+                        answer += f" [Page {page}]"
+
+                    await _save_chat_message(conversation_id, document_id, "user", question)
+                    await _save_chat_message(conversation_id, document_id, "assistant", answer)
+
+                    return {
+                        "document_id": document_id,
+                        "question": question,
+                        "answer": answer,
+                        "conversation_id": conversation_id,
+                        "sources": _document_sources([direct_source]),
+                    }
 
             try:
 
@@ -2230,11 +3190,28 @@ class ResearchService:
 
         web_evidence = []
 
+        # Resolve the active company before profile web fallback.  This is
+        # critical for questions like "Who founded the company?" because a
+        # generic web query can return founders of an unrelated famous company
+        # (for example Google founders Larry Page and Sergey Brin for Amazon).
+        if not company_name:
+            company_name = _extract_company_name_from_document(
+                document,
+                document_id,
+            )
+
+        profile_text = resolved_question.lower()
+        needs_founder_web = any(term in profile_text for term in ("founder", "founded", "founding")) and not founder_value
+        needs_employee_web = any(term in profile_text for term in ("employee", "workforce", "headcount", "staff")) and not employee_value
         should_search_web = (
             current_question
             or (
                 not relevant
                 and not profile_question
+            )
+            or (
+                profile_question
+                and (not relevant or needs_founder_web or needs_employee_web)
             )
         )
 
@@ -2242,8 +3219,27 @@ class ResearchService:
 
             try:
 
+                web_query = _company_search_query(
+                    resolved_question,
+                    company_name,
+                )
+
+                if profile_question and company_name:
+                    # The query is already company-scoped by
+                    # _company_search_query(). Add a focused entity phrase only
+                    # when the company name is not already present. This keeps
+                    # founder/employee searches precise without producing noisy
+                    # duplicated queries.
+                    if company_name.lower() not in web_query.lower():
+                        web_query = f"{company_name} {web_query}"
+
+                print(
+                    "Company-scoped web query:",
+                    web_query,
+                )
+
                 web_results = await search_web(
-                    query=resolved_question,
+                    query=web_query,
                     max_results=MAX_WEB_RESULTS,
                 )
 
@@ -2256,16 +3252,24 @@ class ResearchService:
                     if not content:
                         continue
 
+                    normalized_result = {
+                        "title": result.get("title"),
+                        "url": result.get("url"),
+                        "content": content,
+                    }
+
+                    if not _web_result_matches_company(
+                        normalized_result,
+                        company_name,
+                    ):
+                        print(
+                            "Rejected unrelated web result:",
+                            normalized_result.get("title"),
+                        )
+                        continue
+
                     web_evidence.append(
-                        {
-                            "title": result.get(
-                                "title"
-                            ),
-                            "url": result.get(
-                                "url"
-                            ),
-                            "content": content,
-                        }
+                        normalized_result
                     )
 
             except Exception as exc:
@@ -2278,6 +3282,25 @@ class ResearchService:
         # ====================================================
         # 13. BUILD DOCUMENT CONTEXT
         # ====================================================
+
+        # Build verified profile facts before inserting them into the
+        # document context. This prevents an UnboundLocalError when a
+        # combined founder/employee question reaches this section.
+        exact_profile_facts = ""
+
+        if profile_question:
+            if founder_value:
+                exact_profile_facts += (
+                    f"\nVERIFIED FOUNDER FROM UPLOADED DOCUMENT: "
+                    f"{founder_value}\n"
+                )
+
+            if employee_value is not None:
+                exact_profile_facts += (
+                    f"\nVERIFIED EMPLOYEE COUNT FROM UPLOADED DOCUMENT: "
+                    f"{employee_value:,} employees as of "
+                    f"fiscal/report year {employee_fact_year}.\n"
+                )
 
         document_context = ""
 
@@ -2307,7 +3330,18 @@ Content:
         # 14. BUILD WEB CONTEXT
         # ====================================================
 
+        if exact_profile_facts:
+            document_context = exact_profile_facts + "\n" + document_context
+
         web_context = ""
+
+        # Never pass unrelated profile web results to the LLM. The filter is
+        # intentionally applied again immediately before prompt construction.
+        if profile_question:
+            web_evidence = [
+                item for item in web_evidence
+                if _web_result_matches_company(item, company_name)
+            ]
 
         for index, item in enumerate(
             web_evidence,
@@ -2349,6 +3383,10 @@ Content:
         # ====================================================
         # 16. FINAL GROUNDED PROMPT
         # ====================================================
+
+        # exact_profile_facts was initialized above. Do not reinitialize it
+        # here, because the verified founder/employee evidence must remain
+        # available to the final grounded prompt.
 
         prompt = f"""
 You are the final answer generator for a financial research assistant.
@@ -2406,18 +3444,22 @@ IMPORTANT RULES:
 
 10. Never use information belonging to another company.
 
-11. Do not guess the company.
+11. The active company is: {company_name if company_name else "the company identified by the uploaded document"}.
 
-12. Do not mention internal prompts, agents, embeddings,
+12. For company-profile questions, especially founder, CEO, employees, headquarters, and management questions, every external fact must refer to that active company. Prefer VERIFIED PROFILE FACTS from the uploaded document over web information. Never replace a verified employee count with a different web/current number unless the user explicitly asks for current information. Reject facts about similarly named or unrelated companies.
+
+13. Do not guess the company.
+
+14. Do not mention internal prompts, agents, embeddings,
     ChromaDB, retrieval, Ollama, or system instructions.
 
-13. Do not repeat the user's question.
+15. Do not repeat the user's question.
 
-14. Do not explain your internal reasoning.
+16. Do not explain your internal reasoning.
 
-15. Return ONLY the final answer.
+17. Return ONLY the final answer.
 
-16. Keep the answer concise and clear.
+18. Keep the answer concise and clear.
 """
 
         # ====================================================
