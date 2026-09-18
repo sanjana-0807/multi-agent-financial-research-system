@@ -1,59 +1,172 @@
 # agents/report_agent/agent.py
+
 import os
+
 from crewai import Agent, LLM
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# ============================================================
+# Ollama Configuration
+# ============================================================
+
+# Ollama server
+OLLAMA_BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+).strip()
+
+
+# Model name from environment, if provided.
+# Example accepted values:
+#
+#   llama3.2:latest
+#   ollama/llama3.2:latest
+#
+OLLAMA_MODEL_NAME = os.getenv(
+    "OLLAMA_MODEL",
+    "llama3.2:latest",
+).strip()
+
+
+# ============================================================
+# IMPORTANT:
+# CrewAI needs the "ollama/" provider prefix.
+#
+# If .env contains:
+#     OLLAMA_MODEL=llama3.2:latest
+#
+# convert it to:
+#     ollama/llama3.2:latest
+#
+# If .env already contains:
+#     OLLAMA_MODEL=ollama/llama3.2:latest
+#
+# leave it unchanged.
+# ============================================================
+
+if OLLAMA_MODEL_NAME.lower().startswith("ollama/"):
+    OLLAMA_MODEL = OLLAMA_MODEL_NAME
+else:
+    OLLAMA_MODEL = f"ollama/{OLLAMA_MODEL_NAME}"
+
+
+# ============================================================
+# Ollama LLM
+# ============================================================
+
 llm = LLM(
-    model="ollama/llama3.2:latest",
+    model=OLLAMA_MODEL,
     base_url=OLLAMA_BASE_URL,
+
+    # Low temperature gives consistent financial narratives.
+    temperature=0.1,
+
+    # Keep the generated report narrative concise.
+    max_tokens=350,
 )
 
 
+# ============================================================
+# Startup Diagnostics
+# ============================================================
+
+print(
+    f"[Report Agent] LLM configured: "
+    f"model={OLLAMA_MODEL}, "
+    f"base_url={OLLAMA_BASE_URL}, "
+    f"provider=Ollama"
+)
+
+
+# ============================================================
+# Report Agent
+# ============================================================
+
 def create_report_agent():
     """
-    CrewAI agent scoped ONLY to narrating already-computed report data
-    into an Executive Summary and Outlook.
+    Create the Report Agent.
 
-    It never sees the raw document, and never sees numbers it could
-    get wrong -- it is handed the finished Key Financials, Red Flags,
-    and Company Comparison sections (already computed deterministically
-    or by other agents) and writes prose around them. This mirrors the
-    same principle agents/comparison_agent/crew.py uses for its
-    narrative step.
+    The Report Agent is responsible ONLY for writing:
+
+        1. Executive Summary
+        2. Outlook
+
+    It does NOT:
+
+        - read PDFs
+        - query ChromaDB
+        - perform web searches
+        - retrieve financial information
+        - calculate financial metrics
+        - call other agents
+        - use external tools
+
+    All financial data is supplied by the existing
+    financial extraction, red flag, and comparison
+    processes.
     """
+
     return Agent(
+
+        # ----------------------------------------------------
+        # Role
+        # ----------------------------------------------------
+
         role="Financial Report Writer",
+
+        # ----------------------------------------------------
+        # Goal
+        # ----------------------------------------------------
+
         goal=(
-            "Write a concise, professional Executive Summary and a "
-            "forward-looking Outlook section for a financial research "
-            "report, based strictly on the financial metrics, red "
-            "flags, and comparison data provided. Never invent a "
-            "number, ratio, ranking, or finding that is not present "
-            "in the provided data."
+            "Create a concise and professional financial-report "
+            "narrative using ONLY the supplied report data. "
+            "Write an Executive Summary and an Outlook section. "
+            "Do not calculate, modify, estimate, rank, or invent "
+            "financial values."
         ),
+
+        # ----------------------------------------------------
+        # Backstory
+        # ----------------------------------------------------
+
         backstory=(
-            "You are a financial analyst who writes the narrative "
-            "sections of institutional research reports. You write "
-            "in clear, neutral, professional language suitable for "
-            "investors and executives. You highlight what the data "
-            "actually shows -- strengths, risks, and open questions "
-            "-- without exaggeration or speculation beyond what the "
-            "figures and flags support. If a section's underlying "
-            "data was not available, you say so plainly rather than "
-            "filling the gap with a guess."
+            "You are a financial research report writer. "
+            "Other components of the system have already performed "
+            "document retrieval, financial extraction, risk analysis, "
+            "and company comparison. "
+            "\n\n"
+            "Your job is ONLY to convert those verified results "
+            "into clear, concise and professional narrative. "
+            "\n\n"
+            "Use only information explicitly provided in the task "
+            "input. Never introduce outside facts. "
+            "\n\n"
+            "Never invent revenue, profit, assets, liabilities, "
+            "growth rates, employee counts, rankings, risks, "
+            "forecasts, or other financial information. "
+            "\n\n"
+            "If information is unavailable, clearly state that "
+            "the information was not available."
         ),
+
+        # ----------------------------------------------------
+        # Ollama LLM
+        # ----------------------------------------------------
+
         llm=llm,
-        # CrewAI's internal JSON-repair/converter step (triggered when
-        # the LLM's raw output isn't cleanly parseable JSON on the
-        # first try) uses its own default LLM unless explicitly told
-        # otherwise, and defaults to OpenAI even when the agent's own
-        # `llm` is Ollama. Pointing it at the same Ollama model
-        # prevents that internal fallback from ever reaching for a
-        # real OpenAI connection. (Also set OPENAI_API_KEY/API_BASE
-        # env vars to Ollama's OpenAI-compatible endpoint as a second
-        # layer of defense -- see backend/.env.)
-        function_calling_llm=llm,
-        verbose=True,
+
+        # ----------------------------------------------------
+        # Agent configuration
+        # ----------------------------------------------------
+
+        verbose=False,
+
         allow_delegation=False,
-        max_iter=5,
+
+        # The Report Agent should complete its task in one pass.
+        max_iter=1,
+
+        # No tools are required.
+        tools=[],
     )

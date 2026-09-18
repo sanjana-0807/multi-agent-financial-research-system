@@ -28,8 +28,8 @@ function WorkspaceDetailPage() {
   } = useWorkspace()
   const [activeTab, setActiveTab] = useState('overview')
   const [comparisonState, setComparisonState] = useState({
-  companyAId: '', companyBId: '', result: null, compareError: null
-})
+    companyAId: '', companyBId: '', result: null, compareError: null, isFromHistory: false
+  })
   // Lifted the same way as comparisonState: the Report tab unmounts when
   // you switch to another tab, so the last generated report and the
   // comparison selections need to live here, not inside ReportTab itself.
@@ -645,11 +645,28 @@ function ScoreRing({ percent, color, size = 72, strokeWidth = 7 }) {
     </svg>
   )
 }
-// Comparison Agent tab — keeps the existing comparison logic/results,
-// while adding persistent comparison history. Selecting a history item
-// loads the saved result instead of running the Comparison Agent again.
+// ============================================================
+// Full corrected ComparisonTab component for WorkspaceDetailPage.jsx
+//
+// Changes from the version you had:
+//   1. loadHistory() now calls listComparisons(workspace.id, 0, 50) --
+//      server-side workspace scoping instead of client-side filtering
+//      of a global, unbounded collection (this was the actual bug:
+//      a fixed skip/limit page of the unscoped collection could
+//      permanently bury a workspace's own newest comparisons once the
+//      total collection grew past that page).
+//   2. Added an explicit `isFromHistory` flag so the "Saved Comparison"
+//      label only appears when a history item was actually clicked,
+//      not immediately after running a brand-new comparison.
+//   3. useEffect dependency simplified to [workspace?.id] since
+//      filtering by `companies` client-side is no longer needed.
+//
+// Drop this in place of the existing ComparisonTab function in
+// WorkspaceDetailPage.jsx (everything else in that file is unchanged).
+// ============================================================
+
 function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, setComparisonState }) {
-  const { companyAId, companyBId, result, compareError } = comparisonState
+  const { companyAId, companyBId, result, compareError, isFromHistory } = comparisonState
   const [comparing, setComparing] = useState(false)
   const [history, setHistory] = useState([])
   const [loadingHistory, setLoadingHistory] = useState(true)
@@ -659,11 +676,11 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
   const canCompare = companyAId && companyBId && companyAId !== companyBId
 
   function handleChangeA(id) {
-    setComparisonState((prev) => ({ ...prev, companyAId: id, result: null, compareError: null }))
+    setComparisonState((prev) => ({ ...prev, companyAId: id, result: null, compareError: null, isFromHistory: false }))
   }
 
   function handleChangeB(id) {
-    setComparisonState((prev) => ({ ...prev, companyBId: id, result: null, compareError: null }))
+    setComparisonState((prev) => ({ ...prev, companyBId: id, result: null, compareError: null, isFromHistory: false }))
   }
 
   async function loadHistory() {
@@ -677,21 +694,14 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
     setHistoryError(null)
 
     try {
-      const res = await listComparisons(0, 50)
-      const workspaceCompanyIds = new Set(companies.map((c) => String(c.id)))
+      const res = await listComparisons(workspace.id, 0, 50)
+      const sorted = [...(res.data || [])].sort((a, b) => {
+        const dateA = new Date(a.completed_at || a.created_at || 0).getTime()
+        const dateB = new Date(b.completed_at || b.created_at || 0).getTime()
+        return dateB - dateA
+      })
 
-      const filtered = (res.data || [])
-        .filter((item) => {
-          const ids = item.company_ids || []
-          return ids.length > 0 && ids.every((id) => workspaceCompanyIds.has(String(id)))
-        })
-        .sort((a, b) => {
-          const dateA = new Date(a.completed_at || a.created_at || 0).getTime()
-          const dateB = new Date(b.completed_at || b.created_at || 0).getTime()
-          return dateB - dateA
-        })
-
-      setHistory(filtered)
+      setHistory(sorted)
     } catch (err) {
       setHistory([])
       setHistoryError(
@@ -705,7 +715,7 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
 
   useEffect(() => {
     loadHistory()
-  }, [workspace?.id, companies])
+  }, [workspace?.id])
 
   async function handleSelectHistory(item) {
     const comparisonId = item.comparison_id || item.id
@@ -726,6 +736,7 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
         companyBId: ids[1] ? String(ids[1]) : '',
         result: saved,
         compareError: null,
+        isFromHistory: true,
       }))
     } catch (err) {
       const detail = err.response?.data?.detail
@@ -745,6 +756,7 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
       companyBId: '',
       result: null,
       compareError: null,
+      isFromHistory: false,
     })
   }
 
@@ -755,7 +767,7 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
 
     try {
       const res = await runComparison(workspace.id, [companyAId, companyBId])
-      setComparisonState((prev) => ({ ...prev, result: res.data }))
+      setComparisonState((prev) => ({ ...prev, result: res.data, isFromHistory: false }))
       await loadHistory()
     } catch (err) {
       const detail = err.response?.data?.detail
@@ -940,12 +952,14 @@ function ComparisonTab({ workspace, companies, onAddDocument, comparisonState, s
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                {result ? 'Saved Comparison' : 'Select Two Companies'}
+                {isFromHistory ? 'Saved Comparison' : (result ? 'Comparison Result' : 'Select Two Companies')}
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                {result
+                {isFromHistory
                   ? 'Viewing a previously generated comparison. No new agent run is performed.'
-                  : 'Choose two companies from this workspace to benchmark.'
+                  : result
+                    ? 'This comparison just ran and has been saved to your history.'
+                    : 'Choose two companies from this workspace to benchmark.'
                 }
               </p>
             </div>

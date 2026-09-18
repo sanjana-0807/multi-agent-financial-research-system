@@ -1,18 +1,30 @@
 # agents/report_agent/crew.py
 
 """
-Report Agent narrative generation.
+Fast Report Agent narrative generation.
 
-The report uses a direct LLM call rather than CrewAI's Task/Crew execution
-path. This avoids the CrewAI JSON-repair path that can unexpectedly route
-through OpenAI.
+The Report Agent receives already-computed financial information
+from the existing agents and generates only:
 
-The LLM is responsible only for narrative analysis.
-All financial calculations and source data come from the existing agents.
+    1. Executive Summary
+    2. Outlook
+
+It does NOT:
+    - search the web
+    - query ChromaDB
+    - read PDFs
+    - calculate financial metrics
+    - run another agent
+    - perform multiple LLM calls
+
+Performance target:
+    ~20-30 seconds total for the narrative generation stage,
+    depending on Ollama/model loading and hardware.
 """
 
 import json
 import re
+import time
 from typing import Optional
 
 from starlette.concurrency import run_in_threadpool
@@ -26,6 +38,21 @@ from models.comparison_result import ComparisonResult
 
 
 # ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Keep the prompt compact.
+# Large prompts significantly increase Ollama processing time.
+MAX_RED_FLAG_CHARS = 5000
+MAX_COMPARISON_CHARS = 5000
+MAX_PROMPT_CHARS = 14000
+
+# Keep generated narrative concise.
+MIN_SUMMARY_CHARS = 250
+MIN_OUTLOOK_CHARS = 200
+
+
+# ============================================================================
 # JSON PARSING
 # ============================================================================
 
@@ -34,13 +61,14 @@ def _extract_json(raw: str) -> dict:
     Extract a JSON object from an LLM response.
 
     Handles:
-    - plain JSON
-    - ```json fenced JSON
-    - accidental text surrounding JSON
+        - plain JSON
+        - ```json fenced JSON
+        - text surrounding JSON
     """
 
     text = str(raw or "").strip()
 
+    # Remove opening markdown fence.
     text = re.sub(
         r"^```(?:json)?",
         "",
@@ -48,6 +76,7 @@ def _extract_json(raw: str) -> dict:
         flags=re.IGNORECASE,
     ).strip()
 
+    # Remove closing markdown fence.
     text = re.sub(
         r"```$",
         "",
@@ -55,6 +84,7 @@ def _extract_json(raw: str) -> dict:
         flags=re.IGNORECASE,
     ).strip()
 
+    # Find JSON object.
     match = re.search(
         r"\{.*\}",
         text,
@@ -120,6 +150,26 @@ def _ratio(value):
 
 
 # ============================================================================
+# TEXT LIMITER
+# ============================================================================
+
+def _limit_text(text: str, max_chars: int) -> str:
+    """
+    Prevent unnecessarily large prompts from being sent to Ollama.
+    """
+
+    text = str(text or "").strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    return (
+        text[:max_chars]
+        + "\n\n[Additional context omitted for report speed.]"
+    )
+
+
+# ============================================================================
 # FINANCIAL CONTEXT
 # ============================================================================
 
@@ -168,7 +218,11 @@ def _format_red_flags(
         f"Overall Risk: {red_flags.overall_risk or 'Not assessed'}"
     ]
 
-    for index, flag in enumerate(red_flags.flags, start=1):
+    # Only send the most important risks to the narrative LLM.
+    # The full red-flag data remains available elsewhere in the report.
+    flags = red_flags.flags[:5]
+
+    for index, flag in enumerate(flags, start=1):
 
         lines.append(
             f"""
@@ -178,12 +232,14 @@ Severity: {flag.severity or 'N/A'}
 Title: {flag.title or 'Unnamed risk'}
 Explanation: {flag.explanation or 'N/A'}
 Evidence: {flag.evidence or 'N/A'}
-Source Metric: {flag.source_metric_id or 'N/A'}
 Source Page: {flag.page_number or 'N/A'}
 """.strip()
         )
 
-    return "\n\n".join(lines)
+    return _limit_text(
+        "\n\n".join(lines),
+        MAX_RED_FLAG_CHARS,
+    )
 
 
 # ============================================================================
@@ -202,7 +258,8 @@ def _format_comparisons(
 
     sections = []
 
-    for comp in comparisons:
+    # Limit the amount of comparison data passed to the LLM.
+    for comp in comparisons[:3]:
 
         tickers = list(comp.tickers or [])
 
@@ -214,7 +271,7 @@ def _format_comparisons(
         # Ratios
         # ---------------------------------------------------------------
 
-        for ratio in comp.ratio_comparisons or []:
+        for ratio in (comp.ratio_comparisons or [])[:5]:
 
             lines.append(
                 f"\nRatio: {ratio.ratio_name}"
@@ -228,26 +285,14 @@ def _format_comparisons(
                         f"  {ticker}: {_number(values[ticker])}"
                     )
 
-            # Additional values not explicitly listed in tickers.
-            for ticker, value in values.items():
-                if ticker not in tickers:
-                    lines.append(
-                        f"  {ticker}: {_number(value)}"
-                    )
-
             if ratio.industry_average is not None:
                 lines.append(
                     "  Industry Average: "
                     f"{_number(ratio.industry_average)}"
                 )
 
-            if ratio.best_performer:
-                lines.append(
-                    f"  Best Performer: {ratio.best_performer}"
-                )
-
         # ---------------------------------------------------------------
-        # Industry rankings
+        # Rankings
         # ---------------------------------------------------------------
 
         if comp.industry_rankings:
@@ -259,7 +304,7 @@ def _format_comparisons(
                 key=lambda item: item.rank,
             )
 
-            for rank in rankings:
+            for rank in rankings[:5]:
 
                 score_text = ""
 
@@ -269,18 +314,21 @@ def _format_comparisons(
                     )
 
                 lines.append(
-                    f"  #{rank.rank} {rank.ticker}{score_text}"
+                    f"  #{rank.rank} "
+                    f"{rank.ticker}"
+                    f"{score_text}"
                 )
 
         # ---------------------------------------------------------------
-        # Trend analysis
+        # Trend
         # ---------------------------------------------------------------
 
         if comp.trend_analysis:
 
             lines.append("\nTrend Data:")
 
-            for point in comp.trend_analysis:
+            for point in comp.trend_analysis[:5]:
+
                 lines.append(
                     f"  Period: {point.period}, "
                     f"Ticker: {point.ticker}, "
@@ -288,18 +336,27 @@ def _format_comparisons(
                 )
 
         # ---------------------------------------------------------------
-        # Existing comparison summary
+        # Existing summary
         # ---------------------------------------------------------------
 
         if comp.summary:
             lines.append(
                 "\nExisting Comparison Summary:"
             )
-            lines.append(str(comp.summary))
+
+            lines.append(
+                _limit_text(
+                    str(comp.summary),
+                    1500,
+                )
+            )
 
         sections.append("\n".join(lines))
 
-    return "\n\n".join(sections)
+    return _limit_text(
+        "\n\n".join(sections),
+        MAX_COMPARISON_CHARS,
+    )
 
 
 # ============================================================================
@@ -313,11 +370,9 @@ def _fallback_narrative(
     comparisons: list[ComparisonResult],
 ) -> dict:
     """
-    Produces a professional fallback narrative if the LLM is unavailable.
+    Fast deterministic fallback.
 
-    IMPORTANT:
-    This intentionally does not mention AI, automation, failed generation,
-    or missing narrative generation.
+    Used if Ollama is unavailable or returns invalid JSON.
     """
 
     ratios = extraction.get("ratios", {}) or {}
@@ -331,12 +386,15 @@ def _fallback_narrative(
 
     margin = ratios.get("net_profit_margin")
     debt_equity = ratios.get("debt_to_equity")
-    current_ratio = ratios.get("current_ratio")
 
-    year = extraction.get("fiscal_year") or "the reported fiscal year"
+    year = (
+        extraction.get("fiscal_year")
+        or "the reported fiscal year"
+    )
 
     summary_parts = []
 
+    # Basic financial profile.
     summary_parts.append(
         f"{company.name} ({company.ticker}) reported "
         f"revenue of {_money(revenue)} and net profit of "
@@ -346,32 +404,33 @@ def _fallback_narrative(
     if margin is not None:
         summary_parts.append(
             f"The reported net profit margin was "
-            f"{_percent(margin)}, providing a direct measure of "
-            f"the company's conversion of revenue into earnings."
+            f"{_percent(margin)}."
         )
 
     if assets is not None and liabilities is not None:
         summary_parts.append(
             f"The balance sheet included total assets of "
             f"{_money(assets)} against liabilities of "
-            f"{_money(liabilities)}, while the reported "
-            f"debt-to-equity ratio was {_ratio(debt_equity)}."
+            f"{_money(liabilities)}."
+        )
+
+    if debt_equity is not None:
+        summary_parts.append(
+            f"The reported debt-to-equity ratio was "
+            f"{_ratio(debt_equity)}."
         )
 
     if cash_flow is not None:
         summary_parts.append(
-            f"Reported cash flow was {_money(cash_flow)}, "
-            f"which should be considered alongside profitability "
-            f"when assessing the quality of the period's financial "
-            f"performance."
+            f"Reported cash flow was {_money(cash_flow)}."
         )
 
     if eps is not None:
         summary_parts.append(
-            f"EPS was {_number(eps)}, adding an earnings-per-share "
-            f"measure to the assessment of reported profitability."
+            f"EPS was {_number(eps)}."
         )
 
+    # Risk information.
     if red_flags and red_flags.flags:
 
         high_risks = [
@@ -383,9 +442,8 @@ def _fallback_narrative(
         if high_risks:
             summary_parts.append(
                 f"The risk assessment identifies "
-                f"{len(high_risks)} high-severity issue(s), "
-                f"which warrant particular attention when evaluating "
-                f"the company's financial position."
+                f"{len(high_risks)} high-severity issue(s) "
+                f"requiring particular attention."
             )
         else:
             summary_parts.append(
@@ -396,38 +454,31 @@ def _fallback_narrative(
 
     if comparisons:
         summary_parts.append(
-            "The available peer comparison provides additional "
-            "context for evaluating the company's financial ratios "
-            "and relative industry position."
+            "Available peer comparison data provides additional "
+            "context for evaluating the company's financial position."
         )
 
     executive_summary = " ".join(summary_parts)
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
     # Outlook
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
 
-    outlook_parts = []
-
-    outlook_parts.append(
-        f"The near-term assessment should focus on the relationship "
-        f"between reported profitability, cash generation and the "
-        f"company's balance-sheet position."
-    )
+    outlook_parts = [
+        "The near-term assessment should focus on reported "
+        "profitability, cash generation and balance-sheet position."
+    ]
 
     if margin is not None:
         outlook_parts.append(
-            f"With a net profit margin of {_percent(margin)}, "
-            f"future reporting periods should be evaluated for "
-            f"whether profitability remains consistent with the "
-            f"current reported level."
+            f"Future reporting periods should be evaluated against "
+            f"the current net profit margin of {_percent(margin)}."
         )
 
     if debt_equity is not None:
         outlook_parts.append(
             f"The debt-to-equity ratio of {_ratio(debt_equity)} "
-            f"also provides an important reference point for "
-            f"monitoring financial leverage."
+            f"should remain an important leverage reference point."
         )
 
     if red_flags and red_flags.flags:
@@ -440,39 +491,24 @@ def _fallback_narrative(
 
         if titles:
             outlook_parts.append(
-                "Particular attention should remain on the identified "
-                "risk areas, including "
+                "Attention should remain on the identified risk areas, "
+                "including "
                 + ", ".join(titles)
                 + "."
             )
 
     if comparisons:
         outlook_parts.append(
-            "Peer comparison should continue to be used to determine "
-            "whether the company's relative position remains stable "
-            "as additional financial information becomes available."
+            "Peer comparison can continue to provide context as "
+            "additional financial information becomes available."
         )
 
     outlook_parts.append(
-        "The most useful monitoring points are therefore the "
-        "company's reported profitability, cash-flow performance, "
-        "balance-sheet leverage and the persistence of the risks "
-        "identified in the current assessment."
+        "Subsequent reporting periods should be reviewed against "
+        "the same financial and risk measures."
     )
 
-    conclusion = (
-        f"Conclusion: The reported results provide a financial profile "
-        f"that should be assessed through profitability, balance-sheet "
-        f"strength, cash generation and identified risk factors rather "
-        f"than through any single metric. The available comparison data "
-        f"adds context to the company's relative position, while the "
-        f"red-flag assessment identifies areas requiring continued "
-        f"attention. Subsequent reporting periods should be reviewed "
-        f"against these same measures to determine whether the current "
-        f"financial profile remains consistent."
-    )
-
-    outlook = " ".join(outlook_parts) + "\n\n" + conclusion
+    outlook = " ".join(outlook_parts)
 
     return {
         "executive_summary": executive_summary,
@@ -498,10 +534,12 @@ def _valid_narrative(parsed: dict) -> bool:
     if not isinstance(outlook, str):
         return False
 
-    if len(summary.strip()) < 500:
+    # Do NOT require 500+ characters.
+    # A concise professional report is acceptable.
+    if len(summary.strip()) < MIN_SUMMARY_CHARS:
         return False
 
-    if len(outlook.strip()) < 450:
+    if len(outlook.strip()) < MIN_OUTLOOK_CHARS:
         return False
 
     return True
@@ -517,6 +555,20 @@ async def run_report_narrative(
     red_flags: Optional[RedFlagResult],
     comparisons: list[ComparisonResult],
 ) -> dict:
+    """
+    Generate the Report Agent narrative.
+
+    Exactly ONE LLM call is attempted.
+
+    If the call fails or produces invalid JSON,
+    deterministic fallback is returned immediately.
+    """
+
+    start_time = time.perf_counter()
+
+    # ================================================================
+    # Build compact context
+    # ================================================================
 
     context = {
         "company_name": company.name,
@@ -536,9 +588,31 @@ async def run_report_narrative(
         ),
     }
 
+    # ================================================================
+    # Build prompt
+    # ================================================================
+
     prompt = REPORT_TASK_DESCRIPTION.format(
         **context
     )
+
+    # Final safety limit.
+    prompt = _limit_text(
+        prompt,
+        MAX_PROMPT_CHARS,
+    )
+
+    prompt_build_time = time.perf_counter() - start_time
+
+    print(
+        f"[Report Agent] Prompt preparation: "
+        f"{prompt_build_time:.2f}s | "
+        f"{len(prompt):,} chars"
+    )
+
+    # ================================================================
+    # ONE LLM CALL
+    # ================================================================
 
     def _call_llm() -> str:
 
@@ -549,8 +623,14 @@ async def run_report_narrative(
                     "content": (
                         "You are a senior financial research analyst. "
                         "Return ONLY valid JSON. "
+                        "Do not use markdown. "
                         "Do not mention AI, automation, prompts or models. "
-                        "Use only supplied financial information."
+                        "Use ONLY the financial information supplied. "
+                        "Do not invent or calculate new numbers. "
+                        "\n\n"
+                        "Return exactly this structure: "
+                        '{"executive_summary":"...",'
+                        '"outlook":"..."}'
                     ),
                 },
                 {
@@ -560,9 +640,7 @@ async def run_report_narrative(
             ]
         )
 
-    # ------------------------------------------------------------------
-    # LLM call
-    # ------------------------------------------------------------------
+    llm_start = time.perf_counter()
 
     try:
 
@@ -570,11 +648,26 @@ async def run_report_narrative(
             _call_llm
         )
 
-    except Exception as exc:
+        llm_time = time.perf_counter() - llm_start
 
         print(
-            "Report narrative LLM unavailable; "
-            f"using deterministic financial narrative: {exc}"
+            f"[Report Agent] LLM generation: "
+            f"{llm_time:.2f}s"
+        )
+
+    except Exception as exc:
+
+        total_time = time.perf_counter() - start_time
+
+        print(
+            "[Report Agent] LLM unavailable. "
+            f"Using deterministic fallback. "
+            f"Error: {exc}"
+        )
+
+        print(
+            f"[Report Agent] Total time: "
+            f"{total_time:.2f}s"
         )
 
         return _fallback_narrative(
@@ -584,9 +677,11 @@ async def run_report_narrative(
             comparisons,
         )
 
-    # ------------------------------------------------------------------
-    # Parse
-    # ------------------------------------------------------------------
+    # ================================================================
+    # Parse JSON
+    # ================================================================
+
+    parse_start = time.perf_counter()
 
     try:
 
@@ -595,6 +690,19 @@ async def run_report_narrative(
         )
 
         if _valid_narrative(parsed):
+
+            total_time = time.perf_counter() - start_time
+            parse_time = time.perf_counter() - parse_start
+
+            print(
+                f"[Report Agent] JSON parsing: "
+                f"{parse_time:.2f}s"
+            )
+
+            print(
+                f"[Report Agent] TOTAL: "
+                f"{total_time:.2f}s"
+            )
 
             return {
                 "executive_summary": (
@@ -605,6 +713,11 @@ async def run_report_narrative(
                 ),
             }
 
+        print(
+            "[Report Agent] LLM returned JSON, "
+            "but narrative did not meet minimum requirements."
+        )
+
     except (
         ValueError,
         json.JSONDecodeError,
@@ -612,13 +725,20 @@ async def run_report_narrative(
     ) as exc:
 
         print(
-            "Invalid report narrative returned by LLM; "
-            f"using deterministic fallback: {exc}"
+            "[Report Agent] Invalid JSON returned by LLM: "
+            f"{exc}"
         )
 
-    # ------------------------------------------------------------------
-    # Fallback
-    # ------------------------------------------------------------------
+    # ================================================================
+    # FALLBACK
+    # ================================================================
+
+    total_time = time.perf_counter() - start_time
+
+    print(
+        f"[Report Agent] Using deterministic fallback. "
+        f"TOTAL: {total_time:.2f}s"
+    )
 
     return _fallback_narrative(
         company,

@@ -28,6 +28,14 @@ class TrendPoint(BaseModel):
 
 
 class ComparisonResult(Document):
+    # Optional (not required) so existing documents inserted before this
+    # field existed continue to load without a validation error. Any
+    # record with workspace_id=None predates workspace-scoped history
+    # and will simply never match a workspace-filtered query -- which is
+    # correct, since there is no reliable way to retroactively attribute
+    # it to a workspace.
+    workspace_id: Optional[PydanticObjectId] = None
+
     company_ids: list[PydanticObjectId]       # companies included in this comparison
     tickers: list[str]                        # denormalized for quick display, e.g. ["AAPL", "MSFT"]
 
@@ -43,11 +51,12 @@ class ComparisonResult(Document):
 
     class Settings:
         name = "comparison_results"
-        indexes = ["tickers", "status"]
+        indexes = ["workspace_id", "tickers", "status"]
 
     class Config:
         json_schema_extra = {
             "example": {
+                "workspace_id": "665f1a2b3c4d5e6f7a8b9c0e",
                 "company_ids": ["665f1a2b3c4d5e6f7a8b9c0d"],
                 "tickers": ["AAPL", "MSFT"],
                 "status": "pending",
