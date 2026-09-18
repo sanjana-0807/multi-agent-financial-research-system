@@ -36,6 +36,17 @@ PERCENTAGE_TOP_K = 30
 MAX_EVIDENCE = 6
 MAX_WEB_RESULTS = 3
 
+# FIX: bound the amount of text from any single source that gets pasted
+# into the final Ollama prompt. Document chunks are already capped by
+# DocumentService.CHUNK_SIZE (1000 chars) at index time, but web search
+# results have no such limit -- a single scraped page's "content" field
+# can run into the thousands of characters. Left unbounded, 3 web results
+# plus 6 document chunks can push the assembled prompt well past a typical
+# model context window, which was causing garbled/incoherent answers and
+# long stalls on open-ended questions (summaries, predictions, etc.).
+MAX_CHUNK_CHARS_IN_PROMPT = 1200
+MAX_WEB_CONTENT_CHARS_IN_PROMPT = 800
+
 # ChromaDB distance:
 # Lower = stronger semantic similarity.
 DOCUMENT_THRESHOLD = 0.70
@@ -53,6 +64,23 @@ def _clean(value: Any) -> str:
         return ""
 
     return str(value).strip()
+
+
+def _truncate_for_prompt(text: str, max_chars: int) -> str:
+    """Bound a single piece of context text before it enters the LLM prompt.
+
+    This only affects what is shown to the LLM in the final grounded
+    prompt (document_context / web_context). It does not touch retrieval,
+    scoring, or any of the deterministic fast-path extraction, which
+    continue to operate on the full, untruncated text.
+    """
+    if not text:
+        return text
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rstrip() + " ...[truncated]"
 
 
 def _extract_years(question: str) -> list[int]:
@@ -160,6 +188,17 @@ def _apply_report_year_defaults(
     if any(marker in text for marker in current_markers):
         return question
 
+    # Relative next-year wording is intentional. Do not replace it with the
+    # report year: "how can we increase revenue next year?" is a forward-looking
+    # recommendation question, not a request for the report year's performance.
+    next_markers = (
+        "next year",
+        "following year",
+        "next fiscal year",
+    )
+    if any(marker in text for marker in next_markers):
+        return question
+
     # If the user explicitly asks for a relative previous/prior/last year
     # without history, interpret it relative to the uploaded report year.
     previous_markers = (
@@ -174,8 +213,7 @@ def _apply_report_year_defaults(
     if any(marker in text for marker in previous_markers):
         return f"{question} (use fiscal year {report_year - 1})"
 
-    # Generic financial/profile questions should stay tied to the uploaded
-    # report. The caller only invokes this for financial questions.
+    # Generic financial questions should stay tied to the uploaded report.
     return f"{question} (use fiscal year {report_year})"
 
 
@@ -211,6 +249,63 @@ def _get_last_user_question(
     return None
 
 
+def _is_context_dependent_question(question: str) -> bool:
+    """Return True only when the current question genuinely needs prior context.
+
+    A normal new question must stay isolated from earlier turns. This is
+    especially important for questions such as "how can we increase revenue"
+    where the previous turn may have been a revenue question but the current
+    intent is recommendation/analysis rather than another fact lookup.
+    """
+    if not question:
+        return False
+
+    text = _clean(question).lower()
+
+    explicit_context_phrases = (
+        "what about",
+        "how about",
+        "and what about",
+        "and how about",
+        "what was that",
+        "what was it",
+        "why did it",
+        "why was it",
+        "why is it",
+        "how did it",
+        "how was it",
+        "compare that",
+        "compared with that",
+        "the previous year",
+        "the prior year",
+        "the last year",
+        "that year",
+        "same metric",
+        "same period",
+    )
+
+    if any(phrase in text for phrase in explicit_context_phrases):
+        return True
+
+    # Short elliptical follow-ups such as "and in 2024?" or "and next year?"
+    # need history. Full standalone questions do not.
+    if re.fullmatch(
+        r"(?:and\s+)?(?:in\s+)?(?:20\d{2}|next year|following year|previous year|prior year|last year)\s*[?!.]*",
+        text,
+    ):
+        return True
+
+    if len(text.split()) <= 6 and text.startswith((
+        "and ",
+        "what about ",
+        "how about ",
+        "why ",
+    )):
+        return True
+
+    return False
+
+
 # ============================================================
 # FOLLOW-UP QUESTION HANDLING
 # ============================================================
@@ -223,18 +318,19 @@ def _resolve_follow_up_question(
     if not history:
         return question
 
-    previous = _get_last_user_question(
-        history
-    )
+    # IMPORTANT: Only resolve relative years when the current question is
+    # genuinely dependent on the previous turn. A standalone question such as
+    # "how can we increase revenue by next year?" must never be rewritten
+    # from the previous question because doing so changes its intent.
+    if not _is_context_dependent_question(question):
+        return question
+
+    previous = _get_last_user_question(history)
 
     if not previous:
         return question
 
     text = question.lower()
-
-    # --------------------------------------------------------
-    # Previous year
-    # --------------------------------------------------------
 
     previous_year_phrases = (
         "previous year",
@@ -246,41 +342,17 @@ def _resolve_follow_up_question(
         "last fiscal year",
     )
 
-    if any(
-        phrase in text
-        for phrase in previous_year_phrases
-    ):
-
-        previous_years = _extract_years(
-            previous
-        )
+    if any(phrase in text for phrase in previous_year_phrases):
+        previous_years = _extract_years(previous)
 
         if previous_years:
-
-            target_year = (
-                previous_years[-1] - 1
+            target_year = previous_years[-1] - 1
+            return re.sub(
+                r"\b20\d{2}\b",
+                str(target_year),
+                previous,
+                count=1,
             )
-
-            matches = list(
-                re.finditer(
-                    r"\b20\d{2}\b",
-                    previous,
-                )
-            )
-
-            if matches:
-
-                match = matches[-1]
-
-                return (
-                    previous[:match.start()]
-                    + str(target_year)
-                    + previous[match.end():]
-                )
-
-    # --------------------------------------------------------
-    # Next year
-    # --------------------------------------------------------
 
     next_year_phrases = (
         "next year",
@@ -288,48 +360,22 @@ def _resolve_follow_up_question(
         "next fiscal year",
     )
 
-    if any(
-        phrase in text
-        for phrase in next_year_phrases
-    ):
-
-        previous_years = _extract_years(
-            previous
-        )
+    if any(phrase in text for phrase in next_year_phrases):
+        previous_years = _extract_years(previous)
 
         if previous_years:
-
-            target_year = (
-                previous_years[-1] + 1
+            target_year = previous_years[-1] + 1
+            return re.sub(
+                r"\b20\d{2}\b",
+                str(target_year),
+                previous,
+                count=1,
             )
 
-            matches = list(
-                re.finditer(
-                    r"\b20\d{2}\b",
-                    previous,
-                )
-            )
-
-            if matches:
-
-                match = matches[-1]
-
-                return (
-                    previous[:match.start()]
-                    + str(target_year)
-                    + previous[match.end():]
-                )
-
-    # --------------------------------------------------------
-    # Generic contextual follow-up
-    # --------------------------------------------------------
-
-    return (
-        "Previous user question:\n"
-        f"{previous}\n\n"
-        "Current user question:\n"
-        f"{question}"
-    )
+    # Generic follow-ups remain unchanged. The previous conversation is made
+    # available separately to the final prompt only when this helper classified
+    # the current question as context-dependent.
+    return question
 
 
 # ============================================================
@@ -926,6 +972,70 @@ def _select_profile_evidence(
     return _sort_evidence(
         validated
     )
+
+
+# ============================================================
+# HISTORICAL DOWNTURN / CHALLENGE QUESTION DETECTION
+# ============================================================
+
+def _is_downturn_question(question: str) -> bool:
+    """Detect broad historical questions asking for negative performance or challenges."""
+    text = re.sub(r"\s+", " ", (question or "").lower()).strip()
+
+    terms = (
+        "downfall",
+        "downturn",
+        "decline",
+        "declined",
+        "decrease",
+        "decreased",
+        "drop",
+        "dropped",
+        "fall",
+        "fell",
+        "negative performance",
+        "poor performance",
+        "challenges",
+        "challenge",
+        "difficulties",
+        "difficulty",
+        "setbacks",
+        "setback",
+        "problems faced",
+        "issues faced",
+        "adverse",
+        "headwinds",
+        "weakness",
+        "weaknesses",
+        "risks faced",
+        "risks in",
+        "what went wrong",
+        "what went poorly",
+    )
+
+    return any(term in text for term in terms)
+
+
+def _build_downturn_queries(
+    question: str,
+    report_year: int | None,
+) -> list[str]:
+    """Build a few report-oriented semantic queries for broad negative-performance questions."""
+    year_text = str(report_year) if report_year else "2025"
+
+    queries = [
+        f"{year_text} financial performance decline decreases compared with prior year",
+        f"{year_text} management discussion challenges risks uncertainties adverse factors",
+        f"{year_text} revenue profit deliveries sales gross margin decreases and reasons",
+    ]
+
+    # Keep the user's wording as one query too, because it may contain a
+    # company-specific term that is more useful than our generic expansions.
+    if question and question.strip():
+        queries.insert(0, question.strip())
+
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(queries))[:4]
 
 
 # ============================================================
@@ -2413,7 +2523,11 @@ class ResearchService:
             re.search(r"\b20\d{2}\b", question)
         )
 
-        if has_explicit_year:
+        context_dependent_question = (
+            _is_context_dependent_question(question)
+        )
+
+        if has_explicit_year or not context_dependent_question:
             resolved_question = question
         else:
             resolved_question = (
@@ -2494,7 +2608,19 @@ class ResearchService:
                 report_year,
             )
             print("Report-year percentage resolution:", resolved_question)
-        elif financial_question and report_year and not _extract_years(resolved_question):
+        elif (
+            financial_question
+            and report_year
+            and not _extract_years(resolved_question)
+            and not any(
+                marker in resolved_question.lower()
+                for marker in (
+                    "next year",
+                    "following year",
+                    "next fiscal year",
+                )
+            )
+        ):
             resolved_question = _apply_report_year_defaults(
                 resolved_question,
                 report_year,
@@ -2952,17 +3078,31 @@ class ResearchService:
 
             try:
 
-                chunks = (
-                    retrieve_relevant_chunks(
+                if _is_downturn_question(resolved_question):
+                    retrieval_queries = _build_downturn_queries(
+                        resolved_question,
+                        report_year,
+                    )
+
+                    print(
+                        "Historical challenge retrieval queries:",
+                        retrieval_queries,
+                    )
+
+                    for retrieval_query in retrieval_queries:
+                        chunks = retrieve_relevant_chunks(
+                            query=retrieval_query,
+                            document_id=document_id,
+                            top_k=NORMAL_TOP_K,
+                        )
+                        raw_evidence.extend(chunks)
+                else:
+                    chunks = retrieve_relevant_chunks(
                         query=resolved_question,
                         document_id=document_id,
                         top_k=NORMAL_TOP_K,
                     )
-                )
-
-                raw_evidence.extend(
-                    chunks
-                )
+                    raw_evidence.extend(chunks)
 
             except Exception as exc:
 
@@ -3086,18 +3226,34 @@ class ResearchService:
                         ),
                     }
 
-            answer_evidence = (
-                raw_evidence[
-                    :MAX_EVIDENCE
-                ]
+            answer_evidence = raw_evidence[:MAX_EVIDENCE]
+
+            relevant = _has_relevant_evidence(
+                answer_evidence,
+                DOCUMENT_THRESHOLD,
             )
 
-            relevant = (
-                _has_relevant_evidence(
-                    answer_evidence,
-                    DOCUMENT_THRESHOLD,
+            # Broad historical challenge questions often use informal words
+            # such as "downfall" that do not occur verbatim in an annual report.
+            # The expanded retrieval above is the primary fix. As a safeguard,
+            # treat the presence of clearly report-grounded challenge/decline
+            # language in the retrieved chunks as sufficient evidence even when
+            # the embedding distance is just outside the generic threshold.
+            if _is_downturn_question(resolved_question) and answer_evidence:
+                challenge_markers = (
+                    "decrease", "decreased", "decline", "declined",
+                    "lower", "decreased", "adverse", "uncertainty",
+                    "challenge", "challenges", "risk", "risks",
+                    "headwind", "tariff", "deliveries", "revenue",
+                    "net income", "gross margin",
                 )
-            )
+                relevant = relevant or any(
+                    any(
+                        marker in (item.get("text", "") or "").lower()
+                        for marker in challenge_markers
+                    )
+                    for item in answer_evidence
+                )
 
         # ====================================================
         # 10. DEBUG
@@ -3203,12 +3359,12 @@ class ResearchService:
         profile_text = resolved_question.lower()
         needs_founder_web = any(term in profile_text for term in ("founder", "founded", "founding")) and not founder_value
         needs_employee_web = any(term in profile_text for term in ("employee", "workforce", "headcount", "staff")) and not employee_value
+        # Web search is intentionally limited to requests that explicitly
+        # require current information or profile facts that are missing from
+        # the uploaded report. Historical/report questions must not fall
+        # through to the web merely because semantic relevance is low.
         should_search_web = (
             current_question
-            or (
-                not relevant
-                and not profile_question
-            )
             or (
                 profile_question
                 and (not relevant or needs_founder_web or needs_employee_web)
@@ -3309,6 +3465,15 @@ class ResearchService:
             start=1,
         ):
 
+            # FIX: bound each chunk's text before it enters the prompt.
+            # Chunks are already ~1000 chars at index time, so this is a
+            # safety net rather than the primary fix -- it protects the
+            # prompt size if MAX_EVIDENCE is ever raised later.
+            chunk_text = _truncate_for_prompt(
+                item.get("text", ""),
+                MAX_CHUNK_CHARS_IN_PROMPT,
+            )
+
             document_context += f"""
 
 DOCUMENT EVIDENCE {index}
@@ -3323,7 +3488,7 @@ Document source:
 {item.get("source")}
 
 Content:
-{item.get("text", "")}
+{chunk_text}
 """
 
         # ====================================================
@@ -3348,6 +3513,17 @@ Content:
             start=1,
         ):
 
+            # FIX: this is the main lever for prompt size / latency.
+            # Web result "content" has no length limit at the source
+            # (integrations/web_search_client.py), so a single result can
+            # be several thousand characters. Capping it here is what
+            # actually keeps the assembled prompt small enough to process
+            # quickly and fit inside num_ctx (see crew.py).
+            web_content = _truncate_for_prompt(
+                item.get("content", ""),
+                MAX_WEB_CONTENT_CHARS_IN_PROMPT,
+            )
+
             web_context += f"""
 
 EXTERNAL WEB INFORMATION {index}
@@ -3359,7 +3535,7 @@ URL:
 {item.get("url")}
 
 Content:
-{item.get("content")}
+{web_content}
 """
 
         # ====================================================
@@ -3368,9 +3544,12 @@ Content:
 
         history_context = ""
 
-        if history:
+        # Previous turns are useful only for genuine elliptical follow-ups.
+        # For a new standalone question, especially a recommendation question,
+        # showing previous answers to Llama can cause answer contamination.
+        if history and context_dependent_question:
 
-            recent_history = history[-6:]
+            recent_history = history[-4:]
 
             for message in recent_history:
 
@@ -3415,51 +3594,84 @@ EXTERNAL WEB INFORMATION:
 
 IMPORTANT RULES:
 
-1. Answer the user's question directly.
+1. The CURRENT USER QUESTION is authoritative. Answer it, not any previous
+   question or previous answer.
 
-2. Use uploaded document evidence as the primary source.
+2. Previous conversation is context only for an explicit follow-up. Never
+   copy a previous answer into the current answer merely because the topic
+   is similar.
 
-3. Never invent financial numbers.
+3. Use uploaded document evidence as the primary source.
 
-4. If information comes from the uploaded document,
-   cite it using [Page X] whenever a page is available.
+4. Never invent financial numbers.
 
-5. Do not attribute external web information to the
-   uploaded document.
+5. Preserve the document's units exactly. If a financial statement says
+   amounts are "in millions", then 94,827 means $94,827 million, which is
+   $94.827 billion. Never write $94.827 million for that source value.
 
-6. If external web information is used, clearly label it:
+6. When converting millions to billions, divide by 1,000 and keep the
+   original million figure available for verification.
+
+7. If information comes from the uploaded document, cite it using [Page X]
+   whenever a page is available.
+
+8. Do not attribute external web information to the uploaded document.
+
+9. If external web information is used, clearly label it:
 
    External web information:
 
-7. General model knowledge may only be used when the
-   requested information is not available in the supplied
-   document or external web information.
+10. For historical/company-report questions, do NOT use general model
+    knowledge to fill missing information. If the supplied document evidence
+    is insufficient and no explicit current/web research was requested, say
+    that the information could not be found in the uploaded document.
 
-8. If general model knowledge is used, clearly label it:
+11. Use external web information only when it is explicitly supplied because
+    the user requested current/web information or the question is a profile
+    fact that the report does not contain. Clearly label such information as:
 
-   Additional information from AI/model knowledge:
+    External web information:
 
-9. Never present general model knowledge as if it came
-   from the uploaded document.
+12. Never silently mix model knowledge or unrelated web facts into a
+    document-grounded historical answer.
 
-10. Never use information belonging to another company.
+12A. When the user uses informal wording such as "downfall", "downturn",
+     "what went wrong", or "problems faced", interpret it as a request for
+     negative performance, declines, challenges, risks, or adverse factors
+     reported in the uploaded annual report. Use the report's own terminology
+     in the answer. Do not require the exact word "downfall" to appear in the
+     document.
 
-11. The active company is: {company_name if company_name else "the company identified by the uploaded document"}.
+13. For a question asking "how can we increase revenue", "how could revenue
+    grow", or similar future-looking wording, provide potential actions or
+    drivers grounded in the uploaded report. Do NOT turn the question into a
+    claim about actual future performance.
 
-12. For company-profile questions, especially founder, CEO, employees, headquarters, and management questions, every external fact must refer to that active company. Prefer VERIFIED PROFILE FACTS from the uploaded document over web information. Never replace a verified employee count with a different web/current number unless the user explicitly asks for current information. Reject facts about similarly named or unrelated companies.
+14. For "next year" in a 2025 annual report, treat it as the following
+    year (2026) for planning context, but do not claim that 2026 performance
+    has already occurred unless the supplied evidence explicitly says so.
 
-13. Do not guess the company.
+15. Never use information belonging to another company.
 
-14. Do not mention internal prompts, agents, embeddings,
-    ChromaDB, retrieval, Ollama, or system instructions.
+16. The active company is: {company_name if company_name else "the company identified by the uploaded document"}.
 
-15. Do not repeat the user's question.
+17. For company-profile questions, especially founder, CEO, employees,
+    headquarters, and management questions, every external fact must refer to
+    that active company. Prefer VERIFIED PROFILE FACTS from the uploaded
+    document over web information.
 
-16. Do not explain your internal reasoning.
+18. Do not guess the company.
 
-17. Return ONLY the final answer.
+19. Do not mention internal prompts, agents, embeddings, ChromaDB, retrieval,
+    Ollama, or system instructions.
 
-18. Keep the answer concise and clear.
+20. Do not repeat the user's question.
+
+21. Do not explain your internal reasoning.
+
+22. Return ONLY the final answer.
+
+23. Keep the answer concise and clear.
 """
 
         # ====================================================
@@ -3473,7 +3685,7 @@ IMPORTANT RULES:
                 evidence=answer_evidence,
                 web_evidence=web_evidence,
                 calculation_context="",
-                chat_history=history,
+                chat_history=(history if context_dependent_question else []),
             )
 
         except Exception as exc:

@@ -68,7 +68,30 @@ If document evidence is supplied, use it as the primary source.
 For financial numbers:
 - Use only supplied document evidence.
 - Never invent financial numbers.
+- Preserve the source unit exactly. If a statement is in millions, 94,827 means
+  $94,827 million = $94.827 billion, never $94.827 million.
+- Do not silently change million/billion units.
 - Include [Page X] when a page number is available.
+
+For historical questions about the company:
+- Treat the uploaded annual report as the authoritative source.
+- If the user says "downfall", "downturn", "what went wrong", "problems faced",
+  or similar informal wording, interpret it as negative performance, declines,
+  challenges, risks, or adverse factors reported in the annual report. The exact
+  word used by the user does not need to appear in the report.
+- Do not replace missing report evidence with general model knowledge.
+- Do not introduce news, reviews, social-media claims, or other outside facts
+  unless external web information was explicitly requested/supplied.
+- If the report evidence is insufficient, say so instead of guessing.
+
+CURRENT-QUESTION PRIORITY:
+- Answer the current user question, not a previous question or previous answer.
+- Conversation history, when supplied, is context only for genuine follow-ups.
+- Never reuse a previous answer merely because the current question has the
+  same topic or financial metric.
+- For forward-looking questions such as "how can we increase revenue next year?",
+  give document-grounded potential actions/drivers rather than claiming that
+  future-year performance has already happened.
 
 EXTERNAL WEB INFORMATION:
 
@@ -82,15 +105,13 @@ the uploaded financial document.
 
 MODEL KNOWLEDGE:
 
-If the requested information is not available in the supplied
-document evidence or external web information, general model
-knowledge may be used.
+For historical/company-report questions, do NOT use general model
+knowledge to fill gaps in the uploaded report. If the supplied
+document evidence is insufficient and no explicit current/web
+research was requested, state that the information could not be
+found in the uploaded financial document.
 
-When doing this, explicitly write:
-
-Additional information from AI/model knowledge:
-
-Never pretend model knowledge came from the uploaded document.
+Never silently add model knowledge to a document-grounded answer.
 
 FINAL RESPONSE:
 
@@ -119,12 +140,39 @@ Be concise, clear, and direct.
         "options": {
             "temperature": 0.0,
             "num_predict": 180,
+            # ----------------------------------------------------
+            # FIX: explicitly set the context window.
+            #
+            # Ollama defaults to a small context window (commonly
+            # 2048 tokens) unless num_ctx is set here. The grounded
+            # prompt built in research_service.py can include up to
+            # MAX_EVIDENCE document chunks, MAX_WEB_RESULTS web
+            # results, recent chat history, and an 18-rule
+            # instruction block -- for open-ended questions (e.g.
+            # "give summary of the company") this regularly exceeds
+            # 2048 tokens. When that happens, Ollama silently drops
+            # or truncates part of the prompt, which is why answers
+            # were coming back garbled/incoherent instead of failing
+            # cleanly. Raising num_ctx lets the model actually see
+            # the full prompt it was given.
+            "num_ctx": 8192,
         },
     }
 
 
     async with httpx.AsyncClient(
-        timeout=90.0,
+        # ------------------------------------------------------
+        # FIX: raised from 90.0 -> 180.0 as a safety net.
+        #
+        # This does NOT make generation faster by itself -- it
+        # only prevents a legitimately large (but now valid, since
+        # num_ctx was raised) prompt from being killed mid-
+        # processing and falling back to the raw-chunk-dump
+        # fallback in research_service.py before Ollama has a
+        # chance to finish. The real latency fix is trimming the
+        # prompt size itself (see research_service.py's web content
+        # truncation).
+        timeout=180.0,
     ) as client:
 
         response = await client.post(
